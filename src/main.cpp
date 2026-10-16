@@ -22,8 +22,8 @@ constexpr uint32_t MOTOR_UART_BAUD = 115200;
 const MotorPinConfig motorConfigs[MOTOR_COUNT] = {
     {23, 22},  // Motor 1 (Left)
     {12, 11},  // Motor 2 (Left)
-    {9, 8},    // Motor 3 (Right)
-    {7, 6}     // Motor 4 (Right)
+    {8, 9},    // Motor 3 (Right)
+    {6, 7}     // Motor 4 (Right)
 };
 
 // Motor Controller Instance (Library-less)
@@ -33,13 +33,27 @@ MotorController motors(motorConfigs);
 BNO055_7Semi bno;
 bool imuAvailable = false;
 
+/**
+ * @brief Heading source for the gyro straight-hold P controller.
+ * Supplies fused Euler yaw (0..360 deg, NDOF mode) to MotorController.
+ */
+bool imuHeadingProvider(float &headingDegOut) {
+    if (!imuAvailable) return false;
+    float heading, roll, pitch;
+    if (!bno.readEuler(heading, roll, pitch)) return false;
+    headingDegOut = heading;
+    return true;
+}
+
 void initMainScript() {
     IMU_UART.println(F("----------------------------------------------------"));
     IMU_UART.println(F("       [4] MAIN ROBOT SCRIPT OPERATIONAL            "));
     IMU_UART.println(F("----------------------------------------------------"));
     IMU_UART.println(F("# 4-Motor Controller Ready (Library-less)"));
     IMU_UART.println(F("# Pins: M1={23,22}, M2={12,11}, M3={9,8}, M4={7,6}"));
+    IMU_UART.println(F("# Motors 1/2/3 INVERTED, Motor 4 normal"));
     IMU_UART.println(F("# Dual-UART active: USB Serial + Serial1"));
+    IMU_UART.println(F("# Gyro straight-hold: GFWD/GBACK/GSTOP/GKP/GMAX/GSTATUS"));
 
     MOTOR_UART.println(F("# 4-Motor Controller Ready (Library-less)"));
     MOTOR_UART.println(F("# Pins: M1={23,22}, M2={12,11}, M3={9,8}, M4={7,6}"));
@@ -67,6 +81,15 @@ void setup() {
 
     // Initialize Motor pins (pinMode OUTPUT, stopped)
     motors.begin();
+
+    // Flip Motor 1/2/3 direction; Motor 4 stays normal.
+    motors.setInverted(true, true, true, false);
+
+    // Wire gyro straight-hold P controller to the BNO055 fused heading.
+    // Default Kp = 2.0 PWM per degree of heading error.
+    motors.setHeadingProvider(imuHeadingProvider);
+    motors.setStraightKp(2.0f);
+    motors.setStraightMaxCorrection(80.0f);
 
     // Brief settling delay for USB enumeration if plugged into PC
     unsigned long waitSerial = millis();
@@ -102,6 +125,11 @@ void loop() {
     if (currentMillis - lastImuTime >= 20) {
         lastImuTime = currentMillis;
 
+        // Gyro straight-hold P step: reads heading via imuHeadingProvider,
+        // computes error = target - current, applies Kp correction to L/R.
+        // No-op when idle or IMU offline.
+        motors.updateStraight();
+
         if (imuAvailable) {
             uint8_t sys, g, a, m;
             bno.calibBreakdown(sys, g, a, m);
@@ -118,6 +146,22 @@ void loop() {
                 IMU_UART.print(g); IMU_UART.print(',');
                 IMU_UART.print(a); IMU_UART.print(',');
                 IMU_UART.println(m);
+            }
+        }
+
+        // Gyro-hold telemetry at ~5 Hz while active: G,heading,target,err,L,R
+        if (motors.isStraightActive()) {
+            static unsigned gTick = 0;
+            if ((++gTick % 10) == 0) {
+                float headingNow = 0.0f;
+                float target = motors.getStraightTarget();
+                if (imuHeadingProvider(headingNow)) {
+                    float err = GyroStraight::wrapError(target, headingNow);
+                    IMU_UART.printf("G,%.1f,%.1f,%.1f,L=%d,R=%d,Kp=%.2f\r\n",
+                                    headingNow, target, err,
+                                    motors.getLeftSpeed(), motors.getRightSpeed(),
+                                    motors.getStraightKp());
+                }
             }
         }
 

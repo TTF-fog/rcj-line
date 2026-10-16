@@ -97,7 +97,7 @@ class MotorCLI:
                 if self.ser.in_waiting > 0:
                     line = self.ser.readline().decode("utf-8", errors="ignore").strip()
                     if line:
-                        if line.startswith("OK:") or line.startswith("ERR:") or line.startswith("STATUS:") or line.startswith("PONG"):
+                        if line.startswith("OK:") or line.startswith("ERR:") or line.startswith("STATUS:") or line.startswith("GSTATUS:") or line.startswith("PONG"):
                             response_lines.append(line)
                             break
                         elif not line.startswith("Q,") and not line.startswith("#"):
@@ -127,6 +127,13 @@ class MotorCLI:
   stop                   : Coast all motors to stop
   brake                  : Active dynamic short-brake
   status                 : Query current speeds and status
+  ---- Gyro straight-hold (P on heading error) ----
+  gfwd [speed] [kp]      : Drive straight fwd, heading latched (default 150)
+  gback [speed] [kp]     : Drive straight rev, heading latched (default 150)
+  gstop                  : Exit gyro hold + stop motors
+  gkp <kp>               : Set P gain, PWM per deg (0..20)
+  gmax <max>             : Set max correction PWM (0..255)
+  gstatus                : Query gyro hold state + heading
   help                   : Display this help message
   quit / exit            : Exit CLI
 =====================================================================
@@ -176,6 +183,28 @@ class MotorCLI:
                         self.send(f"SPEED {args[0]} {args[1]}")
                     else:
                         print("Usage: speed <left [-255..255]> <right [-255..255]>")
+                elif c == "gfwd":
+                    spd = args[0] if len(args) >= 1 else "150"
+                    kp = f" {args[1]}" if len(args) >= 2 else ""
+                    self.send(f"GFWD {spd}{kp}")
+                elif c == "gback":
+                    spd = args[0] if len(args) >= 1 else "150"
+                    kp = f" {args[1]}" if len(args) >= 2 else ""
+                    self.send(f"GBACK {spd}{kp}")
+                elif c == "gstop":
+                    self.send("GSTOP")
+                elif c == "gkp":
+                    if len(args) == 1:
+                        self.send(f"GKP {args[0]}")
+                    else:
+                        print("Usage: gkp <0.0..20.0> (e.g. gkp 2.5)")
+                elif c == "gmax":
+                    if len(args) == 1:
+                        self.send(f"GMAX {args[0]}")
+                    else:
+                        print("Usage: gmax <0..255> (e.g. gmax 80)")
+                elif c == "gstatus":
+                    self.send("GSTATUS")
                 elif c == "stop":
                     self.send("STOP")
                 elif c in ("brake", "brk"):

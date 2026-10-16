@@ -72,3 +72,31 @@ A dedicated command-line interface for sending commands over the UART bus to the
    ```bash
    /home/ttf/.venv/bin/python tools/motor_cli.py --mock
    ```
+
+### Guided shortcuts (interactive prompt)
+
+Besides raw passthrough, the prompt expands these (defaults in brackets):
+
+```text
+motor> fwd [150] | back [150] | steer <spd> <ratio> | left [120] | right [120]
+motor> speed <L> <R> | stop | brake | status
+motor> gfwd [150] [kp] | gback [150] [kp]   # gyro straight-hold, heading latched
+motor> gstop | gkp <0..20> | gmax <0..255> | gstatus
+```
+
+`GSTATUS` replies are parsed by the CLI (the response filter accepts the
+`GSTATUS:` prefix).
+
+## 3. Motor Control Panel (`tools/motor_gui.py`)
+
+A CustomTkinter desktop panel (requires a display) with drive buttons +
+speed slider, steer ratio slider, gyro straight-hold buttons (`GFWD` /
+`GBACK` / `GSTOP`), Kp slider, `GMAX` entry, `GSTATUS` readout, keyboard
+driving (arrows + space), and a TX/RX log. Reuses the `MotorCLI` serial
+layer, so commands behave identically to the CLI.
+
+```bash
+/home/ttf/.venv/bin/python tools/motor_gui.py --port /dev/ttyACM0
+```
+
+Tick **Mock** + Connect for a dry run without hardware.

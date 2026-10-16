@@ -3,6 +3,10 @@
 
 #include <Arduino.h>
 #include <stdint.h>
+#include "GyroStraight.h"
+
+/** Heading source: fills headingDegOut with 0..360 fused yaw, true on success. */
+typedef bool (*HeadingProviderFn)(float &headingDegOut);
 
 /**
  * @brief Representation of a single H-bridge motor channel using 2 PWM/DIR pins.
@@ -85,6 +89,8 @@ public:
 
     /**
      * @brief Move forward at given speed (all 4 motors forward).
+     * From standstill the motors power up one at a time with a short
+     * stagger gap to spread the inrush peak.
      * @param speed Speed value (0..255)
      */
     void moveForward(int16_t speed);
@@ -129,6 +135,39 @@ public:
      */
     void setInverted(bool inv1, bool inv2, bool inv3, bool inv4);
 
+    // =========================================================================
+    // Gyro straight-hold (P controller on heading deviation)
+    // =========================================================================
+    /**
+     * @brief Provide the heading source (e.g. BNO055 Euler yaw). Required for
+     * GFWD/GBACK auto-latching and for updateStraight().
+     */
+    void setHeadingProvider(HeadingProviderFn fn);
+    void setStraightKp(float kp);
+    float getStraightKp() const;
+    void setStraightMaxCorrection(float maxCorrection);
+    float getStraightMaxCorrection() const;
+
+    /** @brief Start a straight run toward an explicit target heading. */
+    void startStraight(int16_t baseSpeed, float targetHeadingDeg);
+    /**
+     * @brief Start a straight run latched to the current heading.
+     * @return false when no heading provider or IMU read failed.
+     */
+    bool startStraightHere(int16_t baseSpeed);
+    /** @brief Exit straight-hold; optionally coast the motors. */
+    void stopStraight(bool stopMotors = true);
+    bool isStraightActive() const;
+    int16_t getStraightBase() const;
+    float getStraightTarget() const;
+
+    /**
+     * @brief One P-control step: read heading via provider and re-drive
+     * left/right. Call at ~20-50 Hz from loop(). No-op when inactive or
+     * when the IMU is unavailable.
+     */
+    void updateStraight();
+
     /**
      * @brief Get speed of an individual motor (0..3).
      */
@@ -169,6 +208,16 @@ private:
     MotorPinConfig _motors[MOTOR_COUNT];
     int16_t _speeds[MOTOR_COUNT] = {0, 0, 0, 0};
     bool _inverted[MOTOR_COUNT] = {false, false, false, false};
+
+    GyroStraight _straight;
+    HeadingProviderFn _headingProvider = nullptr;
+
+    // Gap between motor power-ups on forward starts from standstill.
+    // Spreads the combined inrush peak so it doesn't trip over-current
+    // protection. Total added latency on a from-stop start: 3 * gap.
+    static constexpr unsigned START_STAGGER_MS = 12;
+    bool allStopped() const;
+    void driveFourStaggered(int16_t m1, int16_t m2, int16_t m3, int16_t m4);
 
     static constexpr size_t CMD_BUF_LEN = 64;
     // Independent buffers for USB Serial and Hardware Serial streams

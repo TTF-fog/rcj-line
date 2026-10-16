@@ -107,6 +107,7 @@ void runMotorTest(MotorController &motors) {
     Serial.println(F("----------------------------------------------------"));
     Serial.println(F("Testing Motors 1..4 (Cytron Maker Drive dual-PWM)"));
     Serial.println(F("Motors: M1={23,22}, M2={12,11}, M3={9,8}, M4={7,6}"));
+    Serial.println(F("Note: M1/M2/M3 run INVERTED, M4 normal (setInverted)"));
     Serial.println(F("Press ANY key to abort sequence at any time.\n"));
 
     const int TEST_SPEED = 100;
