@@ -4,6 +4,7 @@
 #include <Arduino.h>
 #include <stdint.h>
 #include "GyroStraight.h"
+#include "GyroTurn.h"
 
 /** Heading source: fills headingDegOut with 0..360 fused yaw, true on success. */
 typedef bool (*HeadingProviderFn)(float &headingDegOut);
@@ -18,6 +19,17 @@ struct MotorPinConfig {
 };
 
 constexpr int MOTOR_COUNT = 4;
+
+/**
+ * @brief Outcome of a gyro turn, published once via pollTurnDone().
+ */
+struct GyroTurnResult {
+    bool completed;      /**< Reached the heading tolerance. */
+    bool aborted;        /**< IMU heading lost mid-turn. */
+    float finalErr;      /**< Heading error at the end (deg, + = CCW short). */
+    float target;        /**< Target heading (deg, 0..360). */
+    float finalHeading;  /**< Heading at completion (-1 when aborted). */
+};
 
 /**
  * @brief Library-less Motor Controller for 4-motor differential drive.
@@ -168,6 +180,46 @@ public:
      */
     void updateStraight();
 
+    // =========================================================================
+    // Gyro turn (in-place spin to a heading target: 90/45 deg etc.)
+    // =========================================================================
+    /** @brief Turn P gain (PWM per degree). */
+    void setTurnKp(float kp);
+    float getTurnKp() const;
+    /** @brief Minimum turn PWM (stall floor near the target). */
+    void setTurnMinPwm(float minPwm);
+    float getTurnMinPwm() const;
+    /** @brief Turn done tolerance in degrees. */
+    void setTurnTolerance(float tolDeg);
+    float getTurnTolerance() const;
+
+    /**
+     * @brief Start an in-place turn by a relative angle from current heading.
+     * Cancels any active gyro straight-hold.
+     * @param deltaDeg + = left/CCW, - = right/CW
+     * @return false when no heading provider or IMU read failed.
+     */
+    bool startTurnRelative(float deltaDeg, int16_t speed);
+    /** @brief Exit gyro turn; optionally stop motors. */
+    void stopTurn(bool stopMotors = true);
+    bool isTurnActive() const;
+    float getTurnTarget() const;
+    float getTurnSpeed() const;
+
+    /**
+     * @brief One gyro-turn control step. Call at ~20-50 Hz from loop().
+     * Non-blocking; finishes with a short brake then coast and publishes the
+     * result via pollTurnDone(). Stops the motors and aborts the turn when
+     * the IMU read fails repeatedly mid-turn.
+     */
+    void updateTurn();
+
+    /**
+     * @brief Fetch and clear the pending gyro-turn result (one-shot).
+     * @return true when a completed/aborted turn result was available.
+     */
+    bool pollTurnDone(GyroTurnResult &out);
+
     /**
      * @brief Get speed of an individual motor (0..3).
      */
@@ -211,6 +263,25 @@ private:
 
     GyroStraight _straight;
     HeadingProviderFn _headingProvider = nullptr;
+
+    GyroTurn _turn;
+    GyroTurnResult _turnResult = {false, false, 0.0f, 0.0f, -1.0f};
+    bool _turnResultPending = false;
+    bool _turnBrakePending = false;
+    unsigned long _turnBrakeReleaseMs = 0;
+    uint8_t _turnGlitches = 0;
+
+    static constexpr int16_t DEFAULT_TURN_SPEED = 150;
+    static constexpr uint8_t TURN_GLITCH_ABORT = 5;  // failed IMU reads before abort
+    static constexpr unsigned TURN_BRAKE_MS = 80;    // brake hold after finishing
+
+    /** @brief Cancel straight-hold + gyro turn + any pending result/brake. */
+    void cancelAutopilot();
+    void abortTurn();
+    void doGyroTurn(const char *name, float deltaDeg, int16_t speed,
+                    bool haveKp, float kp, Stream &serialStream);
+    void execTurnShortcut(const char *name, float deltaDeg,
+                          char *argSpd, char *argKp, Stream &serialStream);
 
     // Gap between motor power-ups on forward starts from standstill.
     // Spreads the combined inrush peak so it doesn't trip over-current

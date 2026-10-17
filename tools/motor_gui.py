@@ -2,8 +2,10 @@
 """
 CustomTkinter Motor Control Panel for the Robocup Line robot.
 
-Drive controls (FWD/BACK/LEFT/RIGHT/STOP/BRAKE/STEER) plus the gyro
-straight-hold P controller (GFWD/GBACK/GSTOP/GKP/GMAX/GSTATUS).
+Drive controls (FWD/BACK/LEFT/RIGHT/STOP/BRAKE/STEER), the gyro
+straight-hold P controller (GFWD/GBACK/GSTOP/GKP/GMAX/GSTATUS), and the
+gyro turn buttons (GTL90/GTR90/GTL45/GTR45, waiting for the MCU's
+asynchronous TDONE event).
 
 Usage:
     /home/ttf/.venv/bin/python tools/motor_gui.py [--port /dev/ttyACM0] [--baud 115200]
@@ -29,10 +31,10 @@ class MotorGUI(ctk.CTk):
     def __init__(self, port=None, baud=115200):
         super().__init__()
         self.title("Robocup Motor Panel")
-        self.geometry("720x640")
+        self.geometry("720x760")
         self.resizable(False, False)
 
-        self.cli = MotorCLI(port=port, baud=baud, mock=False)
+        self.cli = MotorCLI(port=port, baud=baud)
         self.connected = False
 
         self._build_connection_frame()
@@ -41,6 +43,7 @@ class MotorGUI(ctk.CTk):
         self._build_log_frame()
 
         self._bind_keys()
+        self._poll_rx()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
     # ------------------------------------------------------------------ layout
@@ -56,9 +59,6 @@ class MotorGUI(ctk.CTk):
         ctk.CTkLabel(frm, text="Baud:").pack(side="left", padx=(10, 2))
         self.baud_var = tk.StringVar(value=str(self.cli.baud))
         ctk.CTkEntry(frm, textvariable=self.baud_var, width=80).pack(side="left", padx=2)
-
-        self.mock_var = tk.BooleanVar(value=False)
-        ctk.CTkCheckBox(frm, text="Mock", variable=self.mock_var, width=70).pack(side="left", padx=10)
 
         self.conn_btn = ctk.CTkButton(frm, text="Connect", width=100, command=self._toggle_connect)
         self.conn_btn.pack(side="left", padx=5)
@@ -133,6 +133,28 @@ class MotorGUI(ctk.CTk):
         ctk.CTkEntry(row2, textvariable=self.gmax_var, width=60).pack(side="left", padx=2)
         ctk.CTkButton(row2, text="Set", width=60, command=self._send_gmax).pack(side="left", padx=5)
 
+        # Gyro turns: exact 90/45 deg in-place turns on the MCU heading target
+        row3 = ctk.CTkFrame(frm, fg_color="transparent")
+        row3.pack(fill="x", padx=10, pady=5)
+        ctk.CTkLabel(row3, text="Turn spd:").pack(side="left")
+        self.turn_speed_slider = ctk.CTkSlider(row3, from_=40, to=255, number_of_steps=43, width=140,
+                                               command=lambda v: self.turn_speed_label.configure(
+                                                   text=str(int(round(float(v))))))
+        self.turn_speed_slider.set(150)
+        self.turn_speed_slider.pack(side="left", padx=8)
+        self.turn_speed_label = ctk.CTkLabel(row3, text="150", width=35)
+        self.turn_speed_label.pack(side="left")
+        ctk.CTkLabel(row3, text="(Q/E = 90, Z/C = 45; button waits for TDONE)",
+                     text_color="gray").pack(side="left", padx=10)
+
+        turns = ctk.CTkFrame(frm, fg_color="transparent")
+        turns.pack(fill="x", padx=10, pady=5)
+        ctk.CTkLabel(turns, text="Gyro turns:").pack(side="left", padx=(0, 6))
+        for text, cmd in (("↺ 90°", "GTL90"), ("↻ 90°", "GTR90"),
+                          ("↺ 45°", "GTL45"), ("↻ 45°", "GTR45")):
+            ctk.CTkButton(turns, text=text, width=86,
+                          command=lambda c=cmd: self._send_turn(c)).pack(side="left", padx=3)
+
         self.gyro_label = ctk.CTkLabel(frm, text="Gyro: idle", text_color="gray", anchor="w")
         self.gyro_label.pack(fill="x", padx=10, pady=(0, 5))
 
@@ -152,6 +174,19 @@ class MotorGUI(ctk.CTk):
         self.bind("<Left>", lambda _e: self._send("LEFT", True))
         self.bind("<Right>", lambda _e: self._send("RIGHT", True))
         self.bind("<space>", lambda _e: self._send("STOP", False))
+        self._bind_turn_key("<KeyPress-q>", "GTL90")
+        self._bind_turn_key("<KeyPress-e>", "GTR90")
+        self._bind_turn_key("<KeyPress-z>", "GTL45")
+        self._bind_turn_key("<KeyPress-c>", "GTR45")
+
+    def _bind_turn_key(self, key, cmd):
+        def handler(_e):
+            # Don't hijack keystrokes while typing in a text field
+            w = self.focus_get()
+            if isinstance(w, (tk.Entry, tk.Text)):
+                return
+            self._send_turn(cmd)
+        self.bind(key, handler)
 
     # ------------------------------------------------------------------ actions
     def _toggle_connect(self):
@@ -168,17 +203,24 @@ class MotorGUI(ctk.CTk):
         except ValueError:
             messagebox.showerror("Baud", "Baud rate must be an integer.")
             return
-        self.cli.mock = self.mock_var.get()
+        try:
+            self.cli.baud = int(self.baud_var.get())
+        except ValueError:
+            messagebox.showerror("Baud", "Baud rate must be an integer.")
+            return
         self.cli.connect()
+        if not (self.cli.ser and self.cli.ser.is_open):
+            self.connected = False
+            self._log("SYS", "Connection failed.")
+            return
         self.connected = True
-        mode = "MOCK" if self.cli.mock else (self.cli.port_name or "auto")
         self.conn_btn.configure(text="Disconnect")
-        self.conn_label.configure(text=f"Connected ({mode})", text_color="green")
-        self._log("SYS", f"Connected ({mode}).")
+        self.conn_label.configure(text=f"Connected ({self.cli.port_name})", text_color="green")
+        self._log("SYS", f"Connected ({self.cli.port_name}).")
 
     def _require_connection(self):
         if not self.connected:
-            messagebox.showwarning("Not connected", "Connect to the robot first (or tick Mock).")
+            messagebox.showwarning("Not connected", "Connect to the robot first.")
             return False
         return True
 
@@ -203,6 +245,14 @@ class MotorGUI(ctk.CTk):
             return
         self._send_async(f"GMAX {self.gmax_var.get().strip()}")
 
+    def _turn_speed_int(self):
+        return int(round(float(self.turn_speed_slider.get())))
+
+    def _send_turn(self, base_cmd):
+        if not self._require_connection():
+            return
+        self._send_async(f"{base_cmd} {self._turn_speed_int()}")
+
     def _send_gstatus(self):
         if not self._require_connection():
             return
@@ -223,6 +273,16 @@ class MotorGUI(ctk.CTk):
         resp = self.cli.send(cmd)
         if resp:
             self.after(0, self._log, "RX", resp)
+
+    def _poll_rx(self):
+        """Show asynchronously streamed non-telemetry lines (e.g. TDONE/TABORT)."""
+        try:
+            for line in self.cli.drain_lines():
+                if line.startswith(("Q,", "G,", "T,", "#")):
+                    continue
+                self._log("RX", line)
+        finally:
+            self.after(500, self._poll_rx)
 
     def _speed_int(self):
         return int(round(float(self.speed_slider.get())))

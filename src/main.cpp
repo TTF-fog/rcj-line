@@ -1,6 +1,7 @@
 #define WIRE WIRE
 #include <Arduino.h>
 #include <7Semi_BNO055.h>
+#include <Adafruit_NeoPixel.h>
 #include "MotorController.h"
 #include "Subscripts.h"
 #define WIRE Wire2
@@ -14,6 +15,15 @@
 // Second UART bus (Teensy 4.1 Serial1: Pin 0 RX1, Pin 1 TX1) for external controller
 #define MOTOR_UART  Serial1
 constexpr uint32_t MOTOR_UART_BAUD = 115200;
+
+// =============================================================================
+// NeoPixel status LED(s)
+// =============================================================================
+// NeoPixel(s) driven from pin 32; lit solid white at boot.
+// Adjust NEOPIXEL_COUNT to the number of pixels actually wired on pin 32.
+#define NEOPIXEL_PIN    32
+#define NEOPIXEL_COUNT  8
+Adafruit_NeoPixel neopixel(NEOPIXEL_COUNT, NEOPIXEL_PIN, NEO_GRB + NEO_KHZ800);
 
 // =============================================================================
 // Four-Motor Pin Configuration from src/example.txt
@@ -54,6 +64,8 @@ void initMainScript() {
     IMU_UART.println(F("# Motors 1/2/3 INVERTED, Motor 4 normal"));
     IMU_UART.println(F("# Dual-UART active: USB Serial + Serial1"));
     IMU_UART.println(F("# Gyro straight-hold: GFWD/GBACK/GSTOP/GKP/GMAX/GSTATUS"));
+    IMU_UART.println(F("# Gyro turns: GTURN/GLEFT/GRIGHT/GTL90/GTR90/GTL45/GTR45"));
+    IMU_UART.println(F("# NeoPixel on pin 32: solid white"));
 
     MOTOR_UART.println(F("# 4-Motor Controller Ready (Library-less)"));
     MOTOR_UART.println(F("# Pins: M1={23,22}, M2={12,11}, M3={9,8}, M4={7,6}"));
@@ -78,6 +90,12 @@ void setup() {
     // Initialize USB and Hardware serial buses
     IMU_UART.begin(115200);
     MOTOR_UART.begin(MOTOR_UART_BAUD);
+
+    // Light the NeoPixel(s) on pin 32 solid white
+    neopixel.begin();
+    neopixel.setBrightness(255);
+    neopixel.fill(neopixel.Color(255, 255, 255));
+    neopixel.show();
 
     // Initialize Motor pins (pinMode OUTPUT, stopped)
     motors.begin();
@@ -118,6 +136,20 @@ void loop() {
     motors.processUartCommands(Serial);
     motors.processUartCommands(MOTOR_UART);
 
+    // 1b. Report a finished/aborted gyro turn once, on both UARTs.
+    GyroTurnResult tr;
+    if (motors.pollTurnDone(tr)) {
+        if (tr.completed) {
+            IMU_UART.printf("TDONE err=%.2f target=%.1f head=%.1f\r\n",
+                            tr.finalErr, tr.target, tr.finalHeading);
+            MOTOR_UART.printf("TDONE err=%.2f target=%.1f head=%.1f\r\n",
+                              tr.finalErr, tr.target, tr.finalHeading);
+        } else {
+            IMU_UART.println(F("TABORT imu"));
+            MOTOR_UART.println(F("TABORT imu"));
+        }
+    }
+
     // 2. Read IMU data and stream over primary UART at ~50 Hz (every 20 ms)
     static unsigned long lastImuTime = 0;
     unsigned long currentMillis = millis();
@@ -129,6 +161,10 @@ void loop() {
         // computes error = target - current, applies Kp correction to L/R.
         // No-op when idle or IMU offline.
         motors.updateStraight();
+
+        // Gyro turn P step: spins in place toward the latched target heading,
+        // brakes + publishes TDONE once inside tolerance. No-op when idle.
+        motors.updateTurn();
 
         if (imuAvailable) {
             uint8_t sys, g, a, m;
@@ -161,6 +197,21 @@ void loop() {
                                     headingNow, target, err,
                                     motors.getLeftSpeed(), motors.getRightSpeed(),
                                     motors.getStraightKp());
+                }
+            }
+        }
+
+        // Gyro-turn telemetry at ~5 Hz while active: T,heading,target,err,L,R
+        if (motors.isTurnActive()) {
+            static unsigned tTick = 0;
+            if ((++tTick % 10) == 0) {
+                float headingNow = 0.0f;
+                if (imuHeadingProvider(headingNow)) {
+                    float err = GyroStraight::wrapError(motors.getTurnTarget(), headingNow);
+                    IMU_UART.printf("T,%.1f,%.1f,%.1f,L=%d,R=%d,Kp=%.2f\r\n",
+                                    headingNow, motors.getTurnTarget(), err,
+                                    motors.getLeftSpeed(), motors.getRightSpeed(),
+                                    motors.getTurnKp());
                 }
             }
         }

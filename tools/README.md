@@ -68,11 +68,6 @@ A dedicated command-line interface for sending commands over the UART bus to the
    /home/ttf/.venv/bin/python tools/motor_cli.py --port /dev/ttyACM0 stop
    ```
 
-3. **Mock Mode (Dry-run without hardware)**:
-   ```bash
-   /home/ttf/.venv/bin/python tools/motor_cli.py --mock
-   ```
-
 ### Guided shortcuts (interactive prompt)
 
 Besides raw passthrough, the prompt expands these (defaults in brackets):
@@ -98,5 +93,3 @@ layer, so commands behave identically to the CLI.
 ```bash
 /home/ttf/.venv/bin/python tools/motor_gui.py --port /dev/ttyACM0
 ```
-
-Tick **Mock** + Connect for a dry run without hardware.
