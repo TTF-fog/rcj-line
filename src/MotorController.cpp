@@ -1,6 +1,7 @@
 #include "MotorController.h"
 #include <string.h>
 #include <stdlib.h>
+#include <ctype.h>
 #include <math.h>
 
 MotorController::MotorController(const MotorPinConfig configs[MOTOR_COUNT]) {
@@ -32,6 +33,56 @@ void MotorController::setInverted(bool inv1, bool inv2, bool inv3, bool inv4) {
 
 void MotorController::setHeadingProvider(HeadingProviderFn fn) {
     _headingProvider = fn;
+}
+
+void MotorController::setPixelHandler(PixelSetFn fn) {
+    _pixelHandler = fn;
+}
+
+void MotorController::setBuzzerPin(int pin) {
+    _buzzerPin = pin;
+    if (_buzzerPin >= 0) {
+        pinMode(_buzzerPin, OUTPUT);
+        digitalWrite(_buzzerPin, LOW);   // silent
+    }
+}
+
+void MotorController::setClaw(ServoClaw *claw) {
+    _claw = claw;
+}
+
+void MotorController::beep(uint16_t ms, uint16_t hz, uint8_t count) {
+    if (_buzzerPin < 0 || count == 0) return;
+    _beepMs = (ms < 10) ? 10 : (ms > 1500 ? 1500 : ms);
+    _beepHz = (hz < 100) ? 100 : (hz > 5000 ? 5000 : hz);
+    _beepsLeft = count;
+    _beepGap = false;
+    _toneUntilMs = millis() + _beepMs;
+    tone(_buzzerPin, _beepHz);
+}
+
+void MotorController::serviceBuzzer() {
+    if (_buzzerPin < 0 || _toneUntilMs == 0) return;
+    if ((long)(millis() - _toneUntilMs) < 0) return;
+
+    if (_beepGap) {                     // chirp gap finished -> next chirp
+        _beepGap = false;
+        if (--_beepsLeft) {
+            tone(_buzzerPin, _beepHz);
+            _toneUntilMs = millis() + _beepMs;
+        } else {
+            _toneUntilMs = 0;
+        }
+        return;
+    }
+
+    noTone(_buzzerPin);                 // chirp finished -> pause or done
+    if (_beepsLeft > 1) {
+        _beepGap = true;
+        _toneUntilMs = millis() + BEEP_GAP_MS;
+    } else {
+        _toneUntilMs = 0;
+    }
 }
 
 void MotorController::setStraightKp(float kp) {
@@ -112,10 +163,16 @@ void MotorController::updateStraight() {
 // =========================================================================
 void MotorController::setTurnKp(float kp) { _turn.setKp(kp); }
 float MotorController::getTurnKp() const { return _turn.kp(); }
+void MotorController::setTurnKi(float ki) { _turn.setKi(ki); }
+float MotorController::getTurnKi() const { return _turn.ki(); }
+void MotorController::setTurnKd(float kd) { _turn.setKd(kd); }
+float MotorController::getTurnKd() const { return _turn.kd(); }
 void MotorController::setTurnMinPwm(float minPwm) { _turn.setMinPwm(minPwm); }
 float MotorController::getTurnMinPwm() const { return _turn.minPwm(); }
 void MotorController::setTurnTolerance(float tolDeg) { _turn.setTolerance(tolDeg); }
 float MotorController::getTurnTolerance() const { return _turn.tolerance(); }
+void MotorController::setTurnIntegralMax(float maxPwm) { _turn.setIntegralMax(maxPwm); }
+float MotorController::getTurnIntegralMax() const { return _turn.integralMax(); }
 bool MotorController::isTurnActive() const { return _turn.isActive(); }
 float MotorController::getTurnTarget() const { return _turn.target(); }
 float MotorController::getTurnSpeed() const { return _turn.turnSpeed(); }
@@ -135,6 +192,7 @@ bool MotorController::startTurnRelative(float deltaDeg, int16_t speed) {
     _turnBrakePending = false;
     _turnResultPending = false;
     _turnGlitches = 0;
+    _turnLastStepMs = millis();   // PID dt clock starts now
     _turn.start(heading, deltaDeg, speed);
     return true;
 }
@@ -182,8 +240,20 @@ void MotorController::updateTurn() {
     }
     _turnGlitches = 0;
 
+    // Measure the real loop step time so the I and D terms stay gain-correct
+    // even if loop() jitters or blocks elsewhere.
+    unsigned long now = millis();
+    float dt = 0.02f;
+    if (_turnLastStepMs != 0) {
+        unsigned long delta = now - _turnLastStepMs;
+        if (delta < 1) delta = 1;
+        if (delta > 100) delta = 100;
+        dt = static_cast<float>(delta) / 1000.0f;
+    }
+    _turnLastStepMs = now;
+
     int16_t left, right;
-    if (_turn.compute(heading, left, right)) {
+    if (_turn.compute(heading, left, right, dt)) {
         setMotorSpeeds(left, right);
         return;
     }
@@ -216,14 +286,24 @@ void MotorController::doGyroTurn(const char *name, float deltaDeg, int16_t speed
         serialStream.printf("ERR: %s failed (no heading: IMU offline?)\r\n", name);
         return;
     }
-    serialStream.printf("OK: %s (delta=%.1f target=%.1f spd=%d Kp=%.2f min=%.0f tol=%.1f)\r\n",
-                        name, deltaDeg, getTurnTarget(), speed,
-                        getTurnKp(), getTurnMinPwm(), getTurnTolerance());
+    serialStream.print(F("OK: "));
+    serialStream.print(name);
+    serialStream.print(F(" (delta="));
+    serialStream.print(deltaDeg, 1);
+    serialStream.print(F(" target="));
+    serialStream.print(getTurnTarget(), 1);
+    serialStream.print(F(" spd="));
+    serialStream.print(speed);
+    serialStream.print(F(" Kp="));
+    serialStream.print(getTurnKp(), 2);
+    serialStream.print(F(" min="));
+    serialStream.print(getTurnMinPwm(), 0);
+    serialStream.print(F(" tol="));
+    serialStream.println(getTurnTolerance(), 1);
 }
 
 void MotorController::execTurnShortcut(const char *name, float deltaDeg,
-                                       char *argSpd, char *argKp, Stream &serialStream) {
-    int16_t spd = argSpd ? atoi(argSpd) : DEFAULT_TURN_SPEED;
+                                       char *argSpd, char *argKp, Stream &serialStream) {    int16_t spd = argSpd ? atoi(argSpd) : DEFAULT_TURN_SPEED;
     bool haveKp = (argKp != nullptr);
     float kp = haveKp ? static_cast<float>(atof(argKp)) : 0.0f;
     if (spd <= 0) {
@@ -231,6 +311,11 @@ void MotorController::execTurnShortcut(const char *name, float deltaDeg,
         return;
     }
     doGyroTurn(name, deltaDeg, spd, haveKp, kp, serialStream);
+}
+
+bool MotorController::applyPixelNow() {
+    if (!_pixelHandler) return false;
+    return _pixelHandler(_pixR, _pixG, _pixB, _pixOn ? _pixBri : 0);
 }
 
 void MotorController::stopMotor(int motorIndex) {
@@ -253,15 +338,18 @@ void MotorController::brakeMotor(int motorIndex) {
 void MotorController::driveMotor(int motorIndex, int16_t speed) {
     if (motorIndex < 0 || motorIndex >= MOTOR_COUNT) return;
 
-    if (speed > 255) speed = 255;
-    if (speed < -255) speed = -255;
+    // Global speed cap: clamp magnitude so no motor is ever driven above
+    // MAX_SPEED, whatever the source (manual commands or the gyro mix).
+    // Clamping before storing keeps _speeds / STATUS telemetry honest.
+    if (speed > MAX_SPEED) speed = MAX_SPEED;
+    else if (speed < -MAX_SPEED) speed = -MAX_SPEED;
 
     _speeds[motorIndex] = speed;
     _turnBrakePending = false;  // any drive output cancels a pending brake release
 
     int16_t appliedSpeed = _inverted[motorIndex] ? -speed : speed;
 
-    // Library-less dual-PWM control (Cytron Maker Drive logic matching src/example.txt)
+    // Dual-PWM control matching the onboard driver IN A/IN B inputs
     if (appliedSpeed > 0) {
         analogWrite(_motors[motorIndex].pin1, appliedSpeed);
         analogWrite(_motors[motorIndex].pin2, 0);
@@ -515,7 +603,15 @@ void MotorController::parseAndExecuteCommand(const char *cmd, Stream &serialStre
             float ratio = static_cast<float>(atof(arg2));
             cancelAutopilot();  // manual drive cancels gyro hold (straight + turn)
             steer(spd, ratio);
-            serialStream.printf("OK: STEER %d %.2f (L=%d, R=%d)\r\n", spd, ratio, getLeftSpeed(), getRightSpeed());
+            serialStream.print(F("OK: STEER "));
+            serialStream.print(spd);
+            serialStream.print(' ');
+            serialStream.print(ratio, 2);
+            serialStream.print(F(" (L="));
+            serialStream.print(getLeftSpeed());
+            serialStream.print(F(", R="));
+            serialStream.print(getRightSpeed());
+            serialStream.println(')');
         } else {
             serialStream.println(F("ERR: Usage: STEER <speed [-255..255]> <ratio [-1.0..1.0]>"));
         }
@@ -561,8 +657,13 @@ void MotorController::parseAndExecuteCommand(const char *cmd, Stream &serialStre
             if (spd > 255) spd = 255;
             if (argKp) _straight.setKp(static_cast<float>(atof(argKp)));
             if (startStraightHere(spd)) {
-                serialStream.printf("OK: GFWD %d (target=%.1f, Kp=%.2f)\r\n",
-                                    spd, getStraightTarget(), getStraightKp());
+                serialStream.print(F("OK: GFWD "));
+                serialStream.print(spd);
+                serialStream.print(F(" (target="));
+                serialStream.print(getStraightTarget(), 1);
+                serialStream.print(F(", Kp="));
+                serialStream.print(getStraightKp(), 2);
+                serialStream.println(')');
             } else {
                 serialStream.println(F("ERR: GFWD failed (no heading: IMU offline?)"));
             }
@@ -579,8 +680,13 @@ void MotorController::parseAndExecuteCommand(const char *cmd, Stream &serialStre
             if (spd > 255) spd = 255;
             if (argKp) _straight.setKp(static_cast<float>(atof(argKp)));
             if (startStraightHere(-spd)) {
-                serialStream.printf("OK: GBACK %d (target=%.1f, Kp=%.2f)\r\n",
-                                    spd, getStraightTarget(), getStraightKp());
+                serialStream.print(F("OK: GBACK "));
+                serialStream.print(spd);
+                serialStream.print(F(" (target="));
+                serialStream.print(getStraightTarget(), 1);
+                serialStream.print(F(", Kp="));
+                serialStream.print(getStraightKp(), 2);
+                serialStream.println(')');
             } else {
                 serialStream.println(F("ERR: GBACK failed (no heading: IMU offline?)"));
             }
@@ -598,7 +704,8 @@ void MotorController::parseAndExecuteCommand(const char *cmd, Stream &serialStre
             if (kp < 0.0f) kp = 0.0f;
             if (kp > 20.0f) kp = 20.0f;
             setStraightKp(kp);
-            serialStream.printf("OK: GKP %.2f\r\n", getStraightKp());
+            serialStream.print(F("OK: GKP "));
+            serialStream.println(getStraightKp(), 2);
         } else {
             serialStream.println(F("ERR: Usage: GKP <0.0..20.0>"));
         }
@@ -609,7 +716,8 @@ void MotorController::parseAndExecuteCommand(const char *cmd, Stream &serialStre
             if (m < 0.0f) m = 0.0f;
             if (m > 255.0f) m = 255.0f;
             setStraightMaxCorrection(m);
-            serialStream.printf("OK: GMAX %.1f\r\n", getStraightMaxCorrection());
+            serialStream.print(F("OK: GMAX "));
+            serialStream.println(getStraightMaxCorrection(), 1);
         } else {
             serialStream.println(F("ERR: Usage: GMAX <0..255>"));
         }
@@ -618,23 +726,69 @@ void MotorController::parseAndExecuteCommand(const char *cmd, Stream &serialStre
         bool haveHeading = (_headingProvider && _headingProvider(heading));
         if (isTurnActive()) {
             float err = haveHeading ? GyroStraight::wrapError(getTurnTarget(), heading) : 0.0f;
-            serialStream.printf("GSTATUS: TURN ACTIVE target=%.1f head=%.1f err=%.1f spd=%d Kp=%.2f min=%.0f tol=%.1f L=%d R=%d\r\n",
-                                getTurnTarget(), haveHeading ? heading : -1.0f, err,
-                                getTurnSpeed(), getTurnKp(), getTurnMinPwm(),
-                                getTurnTolerance(), getLeftSpeed(), getRightSpeed());
+            serialStream.print(F("GSTATUS: TURN ACTIVE target="));
+            serialStream.print(getTurnTarget(), 1);
+            serialStream.print(F(" head="));
+            serialStream.print(haveHeading ? heading : -1.0f, 1);
+            serialStream.print(F(" err="));
+            serialStream.print(err, 1);
+            serialStream.print(F(" spd="));
+            serialStream.print(getTurnSpeed());
+            serialStream.print(F(" Kp="));
+            serialStream.print(getTurnKp(), 2);
+            serialStream.print(F(" Ki="));
+            serialStream.print(getTurnKi(), 3);
+            serialStream.print(F(" Kd="));
+            serialStream.print(getTurnKd(), 3);
+            serialStream.print(F(" iMax="));
+            serialStream.print(getTurnIntegralMax(), 0);
+            serialStream.print(F(" min="));
+            serialStream.print(getTurnMinPwm(), 0);
+            serialStream.print(F(" tol="));
+            serialStream.print(getTurnTolerance(), 1);
+            serialStream.print(F(" L="));
+            serialStream.print(getLeftSpeed());
+            serialStream.print(F(" R="));
+            serialStream.println(getRightSpeed());
         } else if (isStraightActive()) {
             float err = haveHeading ? GyroStraight::wrapError(getStraightTarget(), heading) : 0.0f;
-            serialStream.printf("GSTATUS: ACTIVE base=%d target=%.1f Kp=%.2f max=%.1f head=%.1f err=%.1f L=%d R=%d\r\n",
-                                getStraightBase(), getStraightTarget(), getStraightKp(),
-                                getStraightMaxCorrection(),
-                                haveHeading ? heading : -1.0f, err,
-                                getLeftSpeed(), getRightSpeed());
+            serialStream.print(F("GSTATUS: ACTIVE base="));
+            serialStream.print(getStraightBase());
+            serialStream.print(F(" target="));
+            serialStream.print(getStraightTarget(), 1);
+            serialStream.print(F(" Kp="));
+            serialStream.print(getStraightKp(), 2);
+            serialStream.print(F(" max="));
+            serialStream.print(getStraightMaxCorrection(), 1);
+            serialStream.print(F(" head="));
+            serialStream.print(haveHeading ? heading : -1.0f, 1);
+            serialStream.print(F(" err="));
+            serialStream.print(err, 1);
+            serialStream.print(F(" L="));
+            serialStream.print(getLeftSpeed());
+            serialStream.print(F(" R="));
+            serialStream.println(getRightSpeed());
         } else {
-            serialStream.printf("GSTATUS: IDLE Kp=%.2f max=%.1f turnKp=%.2f turnMin=%.0f turnTol=%.1f head=%.1f L=%d R=%d\r\n",
-                                getStraightKp(), getStraightMaxCorrection(),
-                                getTurnKp(), getTurnMinPwm(), getTurnTolerance(),
-                                haveHeading ? heading : -1.0f,
-                                getLeftSpeed(), getRightSpeed());
+            serialStream.print(F("GSTATUS: IDLE Kp="));
+            serialStream.print(getStraightKp(), 2);
+            serialStream.print(F(" max="));
+            serialStream.print(getStraightMaxCorrection(), 1);
+            serialStream.print(F(" turnKp="));
+            serialStream.print(getTurnKp(), 2);
+            serialStream.print(F(" turnKi="));
+            serialStream.print(getTurnKi(), 3);
+            serialStream.print(F(" turnKd="));
+            serialStream.print(getTurnKd(), 3);
+            serialStream.print(F(" turnMin="));
+            serialStream.print(getTurnMinPwm(), 0);
+            serialStream.print(F(" turnTol="));
+            serialStream.print(getTurnTolerance(), 1);
+            serialStream.print(F(" head="));
+            serialStream.print(haveHeading ? heading : -1.0f, 1);
+            serialStream.print(F(" L="));
+            serialStream.print(getLeftSpeed());
+            serialStream.print(F(" R="));
+            serialStream.println(getRightSpeed());
         }
     } else if (strcasecmp(token, "GTURN") == 0) {
         // Relative gyro turn: +deg = left/CCW, -deg = right/CW.
@@ -716,9 +870,46 @@ void MotorController::parseAndExecuteCommand(const char *cmd, Stream &serialStre
             if (kp < 0.0f) kp = 0.0f;
             if (kp > 50.0f) kp = 50.0f;
             setTurnKp(kp);
-            serialStream.printf("OK: GTKP %.2f\r\n", getTurnKp());
+            serialStream.print(F("OK: GTKP "));
+            serialStream.println(getTurnKp(), 2);
         } else {
             serialStream.println(F("ERR: Usage: GTKP <0.0..50.0>"));
+        }
+    } else if (strcasecmp(token, "GTKI") == 0) {
+        char *arg = strtok_r(nullptr, " \t", &savePtr);
+        if (arg) {
+            float ki = static_cast<float>(atof(arg));
+            if (ki < 0.0f) ki = 0.0f;
+            if (ki > 10.0f) ki = 10.0f;
+            setTurnKi(ki);
+            serialStream.print(F("OK: GTKI "));
+            serialStream.println(getTurnKi(), 3);
+        } else {
+            serialStream.println(F("ERR: Usage: GTKI <0.0..10.0>"));
+        }
+    } else if (strcasecmp(token, "GTKD") == 0) {
+        char *arg = strtok_r(nullptr, " \t", &savePtr);
+        if (arg) {
+            float kd = static_cast<float>(atof(arg));
+            if (kd < 0.0f) kd = 0.0f;
+            if (kd > 20.0f) kd = 20.0f;
+            setTurnKd(kd);
+            serialStream.print(F("OK: GTKD "));
+            serialStream.println(getTurnKd(), 3);
+        } else {
+            serialStream.println(F("ERR: Usage: GTKD <0.0..20.0>"));
+        }
+    } else if (strcasecmp(token, "GTIMAX") == 0) {
+        char *arg = strtok_r(nullptr, " \t", &savePtr);
+        if (arg) {
+            float m = static_cast<float>(atof(arg));
+            if (m < 0.0f) m = 0.0f;
+            if (m > 255.0f) m = 255.0f;
+            setTurnIntegralMax(m);
+            serialStream.print(F("OK: GTIMAX "));
+            serialStream.println(getTurnIntegralMax(), 0);
+        } else {
+            serialStream.println(F("ERR: Usage: GTIMAX <0..255>"));
         }
     } else if (strcasecmp(token, "GTMIN") == 0) {
         char *arg = strtok_r(nullptr, " \t", &savePtr);
@@ -727,7 +918,8 @@ void MotorController::parseAndExecuteCommand(const char *cmd, Stream &serialStre
             if (m < 0.0f) m = 0.0f;
             if (m > 255.0f) m = 255.0f;
             setTurnMinPwm(m);
-            serialStream.printf("OK: GTMIN %.0f\r\n", getTurnMinPwm());
+            serialStream.print(F("OK: GTMIN "));
+            serialStream.println(getTurnMinPwm(), 0);
         } else {
             serialStream.println(F("ERR: Usage: GTMIN <0..255>"));
         }
@@ -738,14 +930,191 @@ void MotorController::parseAndExecuteCommand(const char *cmd, Stream &serialStre
             if (t < 0.5f) t = 0.5f;
             if (t > 20.0f) t = 20.0f;
             setTurnTolerance(t);
-            serialStream.printf("OK: GTTOL %.1f\r\n", getTurnTolerance());
+            serialStream.print(F("OK: GTTOL "));
+            serialStream.println(getTurnTolerance(), 1);
         } else {
             serialStream.println(F("ERR: Usage: GTTOL <0.5..20>"));
         }
+    } else if (strcasecmp(token, "LIGHT") == 0) {
+        char *a1 = strtok_r(nullptr, " \t", &savePtr);
+        if (!_pixelHandler) {
+            serialStream.println(F("ERR: LIGHT: no pixel attached"));
+        } else if (!a1 || a1[0] == '?') {
+            // Status query
+            serialStream.printf("LIGHT: r=%u g=%u b=%u bri=%u on=%d\r\n",
+                                _pixR, _pixG, _pixB, _pixBri, (int)_pixOn);
+        } else if (isdigit((unsigned char)a1[0]) || a1[0] == '-') {
+            // LIGHT <r> <g> <b> [bri]
+            char *a2 = strtok_r(nullptr, " \t", &savePtr);
+            char *a3 = strtok_r(nullptr, " \t", &savePtr);
+            char *a4 = strtok_r(nullptr, " \t", &savePtr);
+            if (a2 && a3) {
+                int r = atoi(a1), g = atoi(a2), b = atoi(a3);
+                int bri = a4 ? atoi(a4) : _pixBri;
+                r = (r < 0) ? 0 : (r > 255 ? 255 : r);
+                g = (g < 0) ? 0 : (g > 255 ? 255 : g);
+                b = (b < 0) ? 0 : (b > 255 ? 255 : b);
+                bri = (bri < 0) ? 0 : (bri > 255 ? 255 : bri);
+                _pixR = (uint8_t)r; _pixG = (uint8_t)g; _pixB = (uint8_t)b;
+                _pixOn = true;
+                if (bri > 0) _pixBriLast = (uint8_t)bri;
+                _pixBri = (uint8_t)bri;
+                applyPixelNow();
+                serialStream.printf("OK: LIGHT r=%u g=%u b=%u bri=%u\r\n",
+                                    _pixR, _pixG, _pixB, _pixBri);
+            } else {
+                serialStream.println(F("ERR: Usage: LIGHT <r 0..255> <g> <b> [bri 0..255]"));
+            }
+        } else if (strcasecmp(a1, "BRI") == 0) {
+            char *a2 = strtok_r(nullptr, " \t", &savePtr);
+            if (a2) {
+                int bri = atoi(a2);
+                bri = (bri < 0) ? 0 : (bri > 255 ? 255 : bri);
+                _pixBri = (uint8_t)bri;
+                if (bri > 0) { _pixBriLast = (uint8_t)bri; _pixOn = true; }
+                else { _pixOn = false; }
+                applyPixelNow();
+                serialStream.printf("OK: LIGHT bri=%u (on=%d)\r\n", _pixBri, (int)_pixOn);
+            } else {
+                serialStream.println(F("ERR: Usage: LIGHT BRI <0..255>"));
+            }
+        } else {
+            // Presets + ON/OFF
+            uint8_t r = _pixR, g = _pixG, b = _pixB;
+            bool preset = true;
+            if (strcasecmp(a1, "OFF") == 0) {
+                if (_pixBri > 0) _pixBriLast = _pixBri;   // remember to restore
+                _pixOn = false;
+            } else if (strcasecmp(a1, "ON") == 0) {
+                _pixOn = true;
+                if (_pixBri == 0) _pixBri = _pixBriLast ? _pixBriLast : 255;
+            } else if (strcasecmp(a1, "RED") == 0)          { r = 255; g = 0;   b = 0;   _pixOn = true; }
+            else if (strcasecmp(a1, "GREEN") == 0)          { r = 0;   g = 255; b = 0;   _pixOn = true; }
+            else if (strcasecmp(a1, "BLUE") == 0)           { r = 0;   g = 0;   b = 255; _pixOn = true; }
+            else if (strcasecmp(a1, "YELLOW") == 0)         { r = 255; g = 255; b = 0;   _pixOn = true; }
+            else if (strcasecmp(a1, "CYAN") == 0)           { r = 0;   g = 255; b = 255; _pixOn = true; }
+            else if (strcasecmp(a1, "MAGENTA") == 0)        { r = 255; g = 0;   b = 255; _pixOn = true; }
+            else if (strcasecmp(a1, "ORANGE") == 0)         { r = 255; g = 80;  b = 0;   _pixOn = true; }
+            else if (strcasecmp(a1, "WHITE") == 0)          { r = 255; g = 255; b = 255; _pixOn = true; }
+            else preset = false;
+
+            if (!preset) {
+                serialStream.printf("ERR: Unknown LIGHT preset '%s'. Use RED/GREEN/BLUE/YELLOW/CYAN/MAGENTA/ORANGE/WHITE/OFF/ON/BRI\r\n", a1);
+            } else {
+                _pixR = r; _pixG = g; _pixB = b;   // persist the preset color
+                applyPixelNow();
+                serialStream.printf("OK: LIGHT r=%u g=%u b=%u bri=%u on=%d\r\n",
+                                    _pixR, _pixG, _pixB, _pixOn ? _pixBri : 0, (int)_pixOn);
+            }
+        }
+    } else if (strcasecmp(token, "CLAW") == 0) {
+        // Claw jaws (GP2/GP7) + pickup arm (GP5): run an action, optionally
+        // tuning that action's angle(s) in the same line, e.g.
+        //   CLAW OPEN 15 165   -> set open angles AND move the jaws there
+        //   CLAW OPEN          -> just move to the stored open angles
+        char *sub = strtok_r(nullptr, " \t", &savePtr);
+        if (!_claw) {
+            serialStream.println(F("ERR: CLAW: no servos on this board"));
+        } else if (!sub || !strcasecmp(sub, "?") || !strcasecmp(sub, "STATUS")) {
+            _claw->printStatus(serialStream);
+        } else if (!strcasecmp(sub, "OPEN") || !strcasecmp(sub, "CLOSE")) {
+            if (_claw->seqActive()) {
+                serialStream.println(F("ERR: CLAW busy (SEQ running)"));
+            } else {
+                bool isOpen = !strcasecmp(sub, "OPEN");
+                char *a1 = strtok_r(nullptr, " \t", &savePtr);
+                char *a2 = strtok_r(nullptr, " \t", &savePtr);
+                if (a1) { if (isOpen) _claw->setOpenLeft(atoi(a1));  else _claw->setCloseLeft(atoi(a1)); }
+                if (a2) { if (isOpen) _claw->setOpenRight(atoi(a2)); else _claw->setCloseRight(atoi(a2)); }
+                if (isOpen) _claw->open(); else _claw->close();
+                serialStream.printf("OK: CLAW %s (L=%d, R=%d)\r\n", isOpen ? "OPEN" : "CLOSE",
+                                    isOpen ? _claw->openLeft() : _claw->closeLeft(),
+                                    isOpen ? _claw->openRight() : _claw->closeRight());
+            }
+        } else if (!strcasecmp(sub, "PICK") || !strcasecmp(sub, "PICKUP") || !strcasecmp(sub, "DROP")) {
+            if (_claw->seqActive()) {
+                serialStream.println(F("ERR: CLAW busy (SEQ running)"));
+            } else {
+                bool isPick = strcasecmp(sub, "DROP") != 0;
+                char *a1 = strtok_r(nullptr, " \t", &savePtr);
+                if (a1) { if (isPick) _claw->setPickupAngle(atoi(a1)); else _claw->setDropAngle(atoi(a1)); }
+                if (isPick) _claw->pickup(); else _claw->drop();
+                serialStream.printf("OK: CLAW %s (deg=%d)\r\n", isPick ? "PICKUP" : "DROP",
+                                    isPick ? _claw->pickupAngle() : _claw->dropAngle());
+            }
+        } else if (!strcasecmp(sub, "SEQ") || !strcasecmp(sub, "SCOOP")) {
+            // Full close -> jaws to the Pi-supplied angles -> pickup ->
+            // slow open. Non-blocking; finished via an async CLAWSEQ line.
+            char *a1 = strtok_r(nullptr, " \t", &savePtr);
+            char *a2 = strtok_r(nullptr, " \t", &savePtr);
+            if (_claw->seqActive()) {
+                serialStream.println(F("ERR: CLAW SEQ already running"));
+            } else if (a1 && a2) {
+                _claw->startSeq(atoi(a1), atoi(a2));
+                serialStream.printf("OK: CLAW SEQ close -> angle(L=%d,R=%d) -> pickup -> slow open\r\n",
+                                    atoi(a1), atoi(a2));
+            } else if (!a1 && !a2) {
+                _claw->startSeq(-1, -1);
+                serialStream.println(F("OK: CLAW SEQ close -> pickup -> slow open"));
+            } else {
+                serialStream.println(F("ERR: Usage: CLAW SEQ [<piL> <piR>] (both angles or none)"));
+            }
+        } else if (!strcasecmp(sub, "RAW")) {
+            char *a1 = strtok_r(nullptr, " \t", &savePtr);
+            char *a2 = strtok_r(nullptr, " \t", &savePtr);
+            if (a1 && a2 && _claw->moveRaw(atoi(a1), atoi(a2))) {
+                serialStream.printf("OK: CLAW RAW %d %d (now L=%d R=%d P=%d)\r\n",
+                                    atoi(a1), _claw->angleOf(atoi(a1)),
+                                    _claw->angleOf(ServoClaw::SERVO_LEFT),
+                                    _claw->angleOf(ServoClaw::SERVO_RIGHT),
+                                    _claw->angleOf(ServoClaw::SERVO_PICKUP));
+            } else {
+                serialStream.println(F("ERR: Usage: CLAW RAW <1=L|2=R|3=pickup> <deg 0..180>"));
+            }
+        } else if (!strcasecmp(sub, "DETACH")) {
+            _claw->detachAll();
+            serialStream.println(F("OK: CLAW DETACH (servos no longer pulsed)"));
+        } else if (!strcasecmp(sub, "ATTACH")) {
+            _claw->begin();
+            serialStream.printf("OK: CLAW ATTACH (attached=%d)\r\n", (int)_claw->attached());
+        } else if (!strcasecmp(sub, "RESET")) {
+            _claw->resetDefaults();
+            serialStream.println(F("OK: CLAW RESET to default angles"));
+            _claw->printStatus(serialStream);
+        } else {
+            serialStream.println(F("ERR: Usage: CLAW OPEN|CLOSE [L] [R] | PICK|DROP [deg] | RAW <1..3> <deg> | ATTACH | DETACH | RESET | STATUS"));
+        }
+    } else if (strcasecmp(token, "BEEP") == 0) {
+        // Non-blocking piezo beep (no-op boards without a buzzer).
+        char *a1 = strtok_r(nullptr, " \t", &savePtr);
+        char *a2 = strtok_r(nullptr, " \t", &savePtr);
+        uint16_t ms = a1 ? (uint16_t)atoi(a1) : 150;
+        uint16_t hz = a2 ? (uint16_t)atoi(a2) : 2730;
+        if (ms < 10) ms = 10;
+        if (ms > 2000) ms = 2000;
+        if (_buzzerPin >= 0) {
+            beep(ms, hz);
+            serialStream.printf("OK: BEEP %u ms %u Hz\r\n", ms, hz);
+        } else {
+            serialStream.println(F("ERR: BEEP: no buzzer on this board"));
+        }
+    } else if (strcasecmp(token, "BOOTLOAD") == 0) {
+#if defined(ARDUINO_ARCH_RP2040)
+        // Reboot straight into the RP2350 UF2 mass-storage bootloader so the
+        // Pi can copy a fresh firmware.uf2 without anyone touching BOOTSEL.
+        serialStream.println(F("OK: rebooting into UF2 bootloader; copy the .uf2 now"));
+        serialStream.flush();
+        delay(20);
+        rp2040.rebootToBootloader();
+        while (true) {}   // never reached
+#else
+        serialStream.println(F("ERR: BOOTLOAD: RP2350 boards only"));
+#endif
     } else if (strcasecmp(token, "PING") == 0) {
         serialStream.println(F("PONG"));
     } else if (strcasecmp(token, "HELP") == 0) {
         serialStream.println(F("--- 4-Motor Driver Commands (No Library) ---"));
+        serialStream.printf("  NOTE: all drive speeds are capped at %d PWM\r\n", MAX_SPEED);
         serialStream.println(F("  SPEED <L> <R>        : Set left & right side speeds (-255..255)"));
         serialStream.println(F("  MOTOR <1..4> <spd>   : Set individual motor speed (-255..255)"));
         serialStream.println(F("  MOTORS <m1..m4>      : Set all 4 motor speeds directly"));
@@ -770,10 +1139,32 @@ void MotorController::parseAndExecuteCommand(const char *cmd, Stream &serialStre
         serialStream.println(F("  GRIGHT <deg> [spd][kp]: Gyro turn right by deg"));
         serialStream.println(F("  GTL90/GTR90 [spd][kp]: Gyro turn exactly 90 deg L/R"));
         serialStream.println(F("  GTL45/GTR45 [spd][kp]: Gyro turn exactly 45 deg L/R"));
-        serialStream.println(F("  GTKP <kp>            : Turn P gain (PWM per deg, 0..50)"));
+        serialStream.println(F("  GTKP <kp>            : Turn Kp (PWM per deg, 0..50)"));
+        serialStream.println(F("  GTKI <ki>            : Turn Ki (PWM per deg-s, 0..10)"));
+        serialStream.println(F("  GTKD <kd>            : Turn Kd (PWM-s per deg, 0..20)"));
+        serialStream.println(F("  GTIMAX <pwm>         : Turn integral term clamp (0..255)"));
         serialStream.println(F("  GTMIN <pwm>          : Turn stall floor PWM (0..255)"));
         serialStream.println(F("  GTTOL <deg>          : Turn done tolerance (0.5..20)"));
         serialStream.println(F("  PING                 : Test communication"));
+        serialStream.printf("  LIGHT <r> <g> <b> [bri]: NeoPixel color (+brightness)\r\n");
+        serialStream.println(F("  LIGHT RED/GREEN/BLUE/YELLOW/CYAN/MAGENTA/ORANGE/WHITE/OFF/ON"));
+        serialStream.println(F("  LIGHT BRI <0..255>   : brightness only | LIGHT ? : status"));
+        if (_claw) {
+            serialStream.println(F("  --- Claw & pickup servos (angles are tunable) ---"));
+            serialStream.println(F("  CLAW OPEN [L] [R]    : jaws apart  (optionally set L/R angles)"));
+            serialStream.println(F("  CLAW CLOSE [L] [R]   : jaws shut   (optionally set L/R angles)"));
+            serialStream.println(F("  CLAW PICK [deg]      : pickup arm down (grab)"));
+            serialStream.println(F("  CLAW DROP [deg]      : pickup arm up (release)"));
+            serialStream.println(F("  CLAW SEQ [piL piR]   : full close -> Pi grip angles"));
+            serialStream.println(F("                       -> pickup -> slow open (async)"));
+            serialStream.println(F("  CLAW RAW <1|2|3> <d> : nudge one servo (1=L,2=R,3=pickup)"));
+            serialStream.println(F("  CLAW ATTACH/DETACH   : re-arm / release the servos"));
+            serialStream.println(F("  CLAW RESET           : default angles | CLAW : status"));
+        }
+#if defined(ARDUINO_ARCH_RP2040)
+        serialStream.println(F("  BEEP <ms> [hz]       : passive buzzer chirp (Motion 2350 Pro)"));
+        serialStream.println(F("  BOOTLOAD             : reboot into UF2 bootloader for flashing"));
+#endif
         serialStream.println(F("--------------------------------------------"));
     } else {
         serialStream.printf("ERR: Unknown command '%s'. Send HELP for usage.\r\n", token);
@@ -802,7 +1193,10 @@ void MotorController::sendBackwardCommand(Stream &serialStream, int16_t speed) {
 }
 
 void MotorController::sendSteerCommand(Stream &serialStream, int16_t speed, float turnRatio) {
-    serialStream.printf("STEER %d %.2f\r\n", speed, turnRatio);
+    serialStream.print(F("STEER "));
+    serialStream.print(speed);
+    serialStream.print(' ');
+    serialStream.println(turnRatio, 2);
 }
 
 void MotorController::sendTurnLeftCommand(Stream &serialStream, int16_t speed) {

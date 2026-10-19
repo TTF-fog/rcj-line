@@ -7,6 +7,9 @@ straight-hold P controller (GFWD/GBACK/GSTOP/GKP/GMAX/GSTATUS), and the
 gyro turn buttons (GTL90/GTR90/GTL45/GTR45, waiting for the MCU's
 asynchronous TDONE event).
 
+Keyboard driving: arrows or WASD (w/s = forward/back, a/d = pivot left/right),
+Space = STOP, Q/E = 90 deg turns, Z/C = 45 deg turns.
+
 Usage:
     /home/ttf/.venv/bin/python tools/motor_gui.py [--port /dev/ttyACM0] [--baud 115200]
 
@@ -15,13 +18,14 @@ serial layer from tools/motor_cli.py.
 """
 
 import argparse
+import re
 import threading
 import tkinter as tk
 from tkinter import messagebox
 
 import customtkinter as ctk
 
-from motor_cli import MotorCLI
+from motor_cli import MotorCLI, MAX_SPEED
 
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
@@ -31,7 +35,7 @@ class MotorGUI(ctk.CTk):
     def __init__(self, port=None, baud=115200):
         super().__init__()
         self.title("Robocup Motor Panel")
-        self.geometry("720x760")
+        self.geometry("760x1080")
         self.resizable(False, False)
 
         self.cli = MotorCLI(port=port, baud=baud)
@@ -39,7 +43,9 @@ class MotorGUI(ctk.CTk):
 
         self._build_connection_frame()
         self._build_drive_frame()
+        self._build_light_frame()
         self._build_gyro_frame()
+        self._build_claw_frame()
         self._build_log_frame()
 
         self._bind_keys()
@@ -73,11 +79,11 @@ class MotorGUI(ctk.CTk):
         row = ctk.CTkFrame(frm, fg_color="transparent")
         row.pack(fill="x", padx=10, pady=5)
         ctk.CTkLabel(row, text="Speed:").pack(side="left")
-        self.speed_slider = ctk.CTkSlider(row, from_=0, to=255, number_of_steps=255,
+        self.speed_slider = ctk.CTkSlider(row, from_=0, to=MAX_SPEED, number_of_steps=MAX_SPEED,
                                           width=300, command=self._on_speed_slider)
-        self.speed_slider.set(150)
+        self.speed_slider.set(MAX_SPEED)
         self.speed_slider.pack(side="left", padx=10)
-        self.speed_label = ctk.CTkLabel(row, text="150", width=40)
+        self.speed_label = ctk.CTkLabel(row, text=str(MAX_SPEED), width=40)
         self.speed_label.pack(side="left")
 
         btns = ctk.CTkFrame(frm, fg_color="transparent")
@@ -102,11 +108,148 @@ class MotorGUI(ctk.CTk):
         self.ratio_slider.configure(command=lambda v: self.ratio_label.configure(text=f"{float(v):.2f}"))
         ctk.CTkButton(steer, text="STEER", width=90, command=self._send_steer).pack(side="left", padx=10)
 
+        ctk.CTkLabel(frm, text=f"Keyboard: arrows or WASD drive (w/s fwd/back, a/d pivot), "
+                               f"Space = STOP. Speeds capped at {MAX_SPEED}.",
+                     text_color="gray").pack(anchor="w", padx=10, pady=(0, 5))
+
+    def _build_light_frame(self):
+        """NeoPixel control: presets, ON/OFF, brightness, status."""
+        frm = ctk.CTkFrame(self)
+        frm.pack(fill="x", padx=10, pady=5)
+        ctk.CTkLabel(frm, text="Light bar (GP18)", font=ctk.CTkFont(weight="bold")).pack(anchor="w", padx=10, pady=(5, 0))
+
+        row = ctk.CTkFrame(frm, fg_color="transparent")
+        row.pack(fill="x", padx=10, pady=5)
+        for text, cmd, color in (
+                ("WHITE", "LIGHT WHITE", "#ddd"),
+                ("RED",   "LIGHT RED",   "#c33"),
+                ("GREEN", "LIGHT GREEN", "#2a7"),
+                ("BLUE",  "LIGHT BLUE",  "#36c"),
+                ("YELLOW","LIGHT YELLOW","#db3"),
+                ("OFF",   "LIGHT OFF",   "#555"),
+                ("ON",    "LIGHT ON",    "#8a8")):
+            ctk.CTkButton(row, text=text, width=76,
+                          fg_color=color, hover_color=color,
+                          command=lambda c=cmd: self._send(c, False)).pack(side="left", padx=3)
+
+        row2 = ctk.CTkFrame(frm, fg_color="transparent")
+        row2.pack(fill="x", padx=10, pady=(0, 5))
+        ctk.CTkLabel(row2, text="Bright:").pack(side="left")
+        self.light_bri_slider = ctk.CTkSlider(row2, from_=0, to=255, number_of_steps=255,
+                                              width=240, command=self._on_light_bri)
+        self.light_bri_slider.set(255)
+        self.light_bri_slider.pack(side="left", padx=10)
+        self.light_bri_label = ctk.CTkLabel(row2, text="255", width=35)
+        self.light_bri_label.pack(side="left")
+        ctk.CTkButton(row2, text="Set", width=60, command=self._send_light_bri).pack(side="left", padx=6)
+        ctk.CTkButton(row2, text="Get", width=60, command=lambda: self._send("LIGHT ?", False)).pack(side="left", padx=3)
+
+    def _build_claw_frame(self):
+        """Claw jaws (GP2/GP7) + pickup arm (GP5): actions, the scoop
+        sequence and the per-angle calibration used to tune each action."""
+        frm = ctk.CTkFrame(self)
+        frm.pack(fill="x", padx=10, pady=5)
+        ctk.CTkLabel(frm, text="Claw / pickup servos (GP2 GP7 GP5)",
+                     font=ctk.CTkFont(weight="bold")).pack(anchor="w", padx=10, pady=(5, 0))
+
+        # Action row: run the calibrated poses with one click.
+        row = ctk.CTkFrame(frm, fg_color="transparent")
+        row.pack(fill="x", padx=10, pady=5)
+        ctk.CTkButton(row, text="OPEN", width=84,
+                      command=lambda: self._send_claw("OPEN")).pack(side="left", padx=3)
+        ctk.CTkButton(row, text="CLOSE", width=84,
+                      command=lambda: self._send_claw("CLOSE")).pack(side="left", padx=3)
+        ctk.CTkButton(row, text="PICK ↓", width=84,
+                      command=lambda: self._send_claw("PICK")).pack(side="left", padx=3)
+        ctk.CTkButton(row, text="DROP ↑", width=84,
+                      command=lambda: self._send_claw("DROP")).pack(side="left", padx=3)
+        self.seq_btn = ctk.CTkButton(row, text="SEQ ▶", width=90, fg_color="#b73",
+                                     hover_color="#d91", command=self._send_claw_seq)
+        self.seq_btn.pack(side="left", padx=(18, 3))
+
+        # Per-action angle calibration. Typing angles and pressing the
+        # matching button re-calibrates AND moves ("CLAW OPEN <l> <r>").
+        self.claw_vars = {
+            "open_l":  tk.StringVar(value="20"),
+            "open_r":  tk.StringVar(value="160"),
+            "close_l": tk.StringVar(value="80"),
+            "close_r": tk.StringVar(value="100"),
+            "pick":    tk.StringVar(value="40"),
+            "drop":    tk.StringVar(value="130"),
+            "pi_l":    tk.StringVar(value=""),
+            "pi_r":    tk.StringVar(value=""),
+        }
+        cal = ctk.CTkFrame(frm, fg_color="transparent")
+        cal.pack(fill="x", padx=10, pady=2)
+        ctk.CTkLabel(cal, text="Calibrate:").pack(side="left")
+        for key, label in (("open_l", "Open L"), ("open_r", "Open R")):
+            ctk.CTkLabel(cal, text=label, text_color="gray").pack(side="left", padx=(10, 1))
+            ctk.CTkEntry(cal, textvariable=self.claw_vars[key], width=52).pack(side="left")
+        ctk.CTkButton(cal, text="Set+Open", width=80,
+                      command=lambda: self._send_claw_pose("OPEN", "open_l", "open_r")
+                      ).pack(side="left", padx=8)
+
+        cal2 = ctk.CTkFrame(frm, fg_color="transparent")
+        cal2.pack(fill="x", padx=10, pady=2)
+        ctk.CTkLabel(cal2, text="            ").pack(side="left")   # spacing spacer
+        for key, label in (("close_l", "Close L"), ("close_r", "Close R")):
+            ctk.CTkLabel(cal2, text=label, text_color="gray").pack(side="left", padx=(10, 1))
+            ctk.CTkEntry(cal2, textvariable=self.claw_vars[key], width=52).pack(side="left")
+        ctk.CTkButton(cal2, text="Set+Close", width=80,
+                      command=lambda: self._send_claw_pose("CLOSE", "close_l", "close_r")
+                      ).pack(side="left", padx=8)
+
+        cal3 = ctk.CTkFrame(frm, fg_color="transparent")
+        cal3.pack(fill="x", padx=10, pady=2)
+        ctk.CTkLabel(cal3, text="            ").pack(side="left")
+        for key, label in (("pick", "Pickup°"), ("drop", "Drop°")):
+            ctk.CTkLabel(cal3, text=label, text_color="gray").pack(side="left", padx=(10, 1))
+            ctk.CTkEntry(cal3, textvariable=self.claw_vars[key], width=52).pack(side="left")
+        ctk.CTkButton(cal3, text="Set+Pick", width=70,
+                      command=lambda: self._send_claw_deg("PICK", "pick")
+                      ).pack(side="left", padx=4)
+        ctk.CTkButton(cal3, text="Set+Drop", width=70,
+                      command=lambda: self._send_claw_deg("DROP", "drop")
+                      ).pack(side="left", padx=4)
+
+        # The scoop: FULL CLOSE -> grip angles from the Pi's info -> PICKUP
+        # -> OPEN carefully. Filled in only when the Pi sent geometry.
+        seqrow = ctk.CTkFrame(frm, fg_color="transparent")
+        seqrow.pack(fill="x", padx=10, pady=2)
+        ctk.CTkLabel(seqrow, text="Pi grip (optional):").pack(side="left")
+        ctk.CTkEntry(seqrow, textvariable=self.claw_vars["pi_l"], width=52,
+                     placeholder_text="L").pack(side="left", padx=3)
+        ctk.CTkEntry(seqrow, textvariable=self.claw_vars["pi_r"], width=52,
+                     placeholder_text="R").pack(side="left", padx=3)
+        ctk.CTkButton(seqrow, text="SEQ (close→Pi→pickup→open)", width=210,
+                      fg_color="#b73", hover_color="#d91",
+                      command=self._send_claw_seq).pack(side="left", padx=8)
+
+        foot = ctk.CTkFrame(frm, fg_color="transparent")
+        foot.pack(fill="x", padx=10, pady=(2, 5))
+        ctk.CTkButton(foot, text="Get", width=60,
+                      command=self._fetch_claw).pack(side="left", padx=3)
+        ctk.CTkButton(foot, text="Reset", width=70,
+                      command=lambda: self._send_claw("RESET")).pack(side="left", padx=3)
+        ctk.CTkButton(foot, text="Detach", width=70,
+                      command=lambda: self._send_claw("DETACH")).pack(side="left", padx=3)
+        ctk.CTkButton(foot, text="Attach", width=70,
+                      command=lambda: self._send_claw("ATTACH")).pack(side="left", padx=3)
+        self.claw_label = ctk.CTkLabel(foot, text="Claw: idle", text_color="gray", anchor="w")
+        self.claw_label.pack(side="left", padx=10)
+
+    def _on_light_bri(self, value):
+        self.light_bri_label.configure(text=str(int(round(float(value)))))
+
+    def _send_light_bri(self):
+        if not self._require_connection():
+            return
+        self._send_async(f"LIGHT BRI {int(round(float(self.light_bri_slider.get())))}")
+
     def _build_gyro_frame(self):
         frm = ctk.CTkFrame(self)
         frm.pack(fill="x", padx=10, pady=5)
         ctk.CTkLabel(frm, text="Gyro straight-hold (P on heading error)", font=ctk.CTkFont(weight="bold")).pack(anchor="w", padx=10, pady=(5, 0))
-
         row1 = ctk.CTkFrame(frm, fg_color="transparent")
         row1.pack(fill="x", padx=10, pady=5)
         ctk.CTkButton(row1, text="GFWD (straight)", width=140, fg_color="#2a7",
@@ -133,16 +276,38 @@ class MotorGUI(ctk.CTk):
         ctk.CTkEntry(row2, textvariable=self.gmax_var, width=60).pack(side="left", padx=2)
         ctk.CTkButton(row2, text="Set", width=60, command=self._send_gmax).pack(side="left", padx=5)
 
+        # Gyro turn PID gains (pushes GTKP/GTKI/GTKD/GTIMAX to the MCU)
+        row25 = ctk.CTkFrame(frm, fg_color="transparent")
+        row25.pack(fill="x", padx=10, pady=5)
+        ctk.CTkLabel(row25, text="Turn PID:").pack(side="left")
+        ctk.CTkLabel(row25, text="Kp").pack(side="left", padx=(10, 2))
+        self.turn_kp_entry = ctk.CTkEntry(row25, width=55, placeholder_text="4.0")
+        self.turn_kp_entry.pack(side="left", padx=2)
+        ctk.CTkButton(row25, text="GTKP", width=58, command=self._send_turn_kp).pack(side="left", padx=5)
+        ctk.CTkLabel(row25, text="Ki").pack(side="left", padx=(10, 2))
+        self.turn_ki_entry = ctk.CTkEntry(row25, width=55, placeholder_text="2.0")
+        self.turn_ki_entry.pack(side="left", padx=2)
+        ctk.CTkButton(row25, text="GTKI", width=58, command=self._send_turn_ki).pack(side="left", padx=5)
+        ctk.CTkLabel(row25, text="Kd").pack(side="left", padx=(10, 2))
+        self.turn_kd_entry = ctk.CTkEntry(row25, width=55, placeholder_text="0.5")
+        self.turn_kd_entry.pack(side="left", padx=2)
+        ctk.CTkButton(row25, text="GTKD", width=58, command=self._send_turn_kd).pack(side="left", padx=5)
+        ctk.CTkLabel(row25, text="iMax").pack(side="left", padx=(10, 2))
+        self.turn_imax_entry = ctk.CTkEntry(row25, width=52, placeholder_text="30")
+        self.turn_imax_entry.pack(side="left", padx=2)
+        ctk.CTkButton(row25, text="GTIMAX", width=64, command=self._send_turn_imax).pack(side="left", padx=5)
+
         # Gyro turns: exact 90/45 deg in-place turns on the MCU heading target
         row3 = ctk.CTkFrame(frm, fg_color="transparent")
         row3.pack(fill="x", padx=10, pady=5)
         ctk.CTkLabel(row3, text="Turn spd:").pack(side="left")
-        self.turn_speed_slider = ctk.CTkSlider(row3, from_=40, to=255, number_of_steps=43, width=140,
+        self.turn_speed_slider = ctk.CTkSlider(row3, from_=40, to=MAX_SPEED, number_of_steps=MAX_SPEED - 40,
+                                               width=140,
                                                command=lambda v: self.turn_speed_label.configure(
                                                    text=str(int(round(float(v))))))
-        self.turn_speed_slider.set(150)
+        self.turn_speed_slider.set(MAX_SPEED)
         self.turn_speed_slider.pack(side="left", padx=8)
-        self.turn_speed_label = ctk.CTkLabel(row3, text="150", width=35)
+        self.turn_speed_label = ctk.CTkLabel(row3, text=str(MAX_SPEED), width=35)
         self.turn_speed_label.pack(side="left")
         ctk.CTkLabel(row3, text="(Q/E = 90, Z/C = 45; button waits for TDONE)",
                      text_color="gray").pack(side="left", padx=10)
@@ -169,15 +334,38 @@ class MotorGUI(ctk.CTk):
         self.log_box.pack(fill="both", expand=True, padx=10, pady=5)
 
     def _bind_keys(self):
-        self.bind("<Up>", lambda _e: self._send("FWD", True))
-        self.bind("<Down>", lambda _e: self._send("BACK", True))
-        self.bind("<Left>", lambda _e: self._send("LEFT", True))
-        self.bind("<Right>", lambda _e: self._send("RIGHT", True))
-        self.bind("<space>", lambda _e: self._send("STOP", False))
+        # Arrow keys have no text meaning, but route everything through the
+        # same focus guard so typing in an entry never drives the robot.
+        self._bind_drive_key("<KeyPress-Up>", "FWD")
+        self._bind_drive_key("<KeyPress-Down>", "BACK")
+        self._bind_drive_key("<KeyPress-Left>", "LEFT")
+        self._bind_drive_key("<KeyPress-Right>", "RIGHT")
+
+        # WASD alternative to the arrow keys (both cases, i.e. shift held too).
+        self._bind_drive_key("<KeyPress-w>", "FWD")
+        self._bind_drive_key("<KeyPress-W>", "FWD")
+        self._bind_drive_key("<KeyPress-s>", "BACK")
+        self._bind_drive_key("<KeyPress-S>", "BACK")
+        self._bind_drive_key("<KeyPress-a>", "LEFT")
+        self._bind_drive_key("<KeyPress-A>", "LEFT")
+        self._bind_drive_key("<KeyPress-d>", "RIGHT")
+        self._bind_drive_key("<KeyPress-D>", "RIGHT")
+
+        self._bind_drive_key("<KeyPress-space>", "STOP", with_speed=False)
+
         self._bind_turn_key("<KeyPress-q>", "GTL90")
         self._bind_turn_key("<KeyPress-e>", "GTR90")
         self._bind_turn_key("<KeyPress-z>", "GTL45")
         self._bind_turn_key("<KeyPress-c>", "GTR45")
+
+    def _bind_drive_key(self, key, cmd, with_speed=True):
+        def handler(_e):
+            # Don't hijack keystrokes while typing in a text field
+            w = self.focus_get()
+            if isinstance(w, (tk.Entry, tk.Text)):
+                return
+            self._send(cmd, with_speed)
+        self.bind(key, handler)
 
     def _bind_turn_key(self, key, cmd):
         def handler(_e):
@@ -245,8 +433,34 @@ class MotorGUI(ctk.CTk):
             return
         self._send_async(f"GMAX {self.gmax_var.get().strip()}")
 
+    def _send_turn_gain(self, cmd, entry, lo, hi, label):
+        if not self._require_connection():
+            return
+        raw = entry.get().strip()
+        try:
+            val = float(raw)
+        except ValueError:
+            messagebox.showerror(label, f"{label} must be a number ({lo}..{hi}).")
+            return
+        if val < lo or val > hi:
+            messagebox.showerror(label, f"{label} must be {lo}..{hi}.")
+            return
+        self._send_async(f"{cmd} {val:.3f}")
+
+    def _send_turn_kp(self):
+        self._send_turn_gain("GTKP", self.turn_kp_entry, 0.0, 50.0, "GTKP")
+
+    def _send_turn_ki(self):
+        self._send_turn_gain("GTKI", self.turn_ki_entry, 0.0, 10.0, "GTKI")
+
+    def _send_turn_kd(self):
+        self._send_turn_gain("GTKD", self.turn_kd_entry, 0.0, 20.0, "GTKD")
+
+    def _send_turn_imax(self):
+        self._send_turn_gain("GTIMAX", self.turn_imax_entry, 0.0, 255.0, "GTIMAX")
+
     def _turn_speed_int(self):
-        return int(round(float(self.turn_speed_slider.get())))
+        return min(MAX_SPEED, max(1, int(round(float(self.turn_speed_slider.get())))))
 
     def _send_turn(self, base_cmd):
         if not self._require_connection():
@@ -257,6 +471,103 @@ class MotorGUI(ctk.CTk):
         if not self._require_connection():
             return
         threading.Thread(target=self._gstatus_worker, daemon=True).start()
+
+    # ------------------------------------------------------------------ claw
+    def _parse_deg(self, var_key, label, allow_empty=True):
+        """Read a degree entry. Returns None when empty (allowed) or -1 when
+        the content is unusable (error dialog shown)."""
+        raw = self.claw_vars[var_key].get().strip()
+        if not raw:
+            return None if allow_empty else -1
+        try:
+            val = int(float(raw))
+        except ValueError:
+            messagebox.showerror(label, f"{label} must be a number in degrees.")
+            return -1
+        if val < 0 or val > 180:
+            messagebox.showerror(label, f"{label} must be 0..180 degrees.")
+            return -1
+        return val
+
+    def _send_claw(self, sub):
+        if not self._require_connection():
+            return
+        self._send_async(f"CLAW {sub}")
+
+    def _send_claw_pose(self, sub, left_key, right_key):
+        """Calibrate + run a jaw action: empty fields -> just run the pose."""
+        if not self._require_connection():
+            return
+        l = self._parse_deg(left_key, f"{sub} left")
+        r = self._parse_deg(right_key, f"{sub} right")
+        if l == -1 or r == -1:
+            return
+        if l is None or r is None:            # half entered: run stored pose
+            self._send_async(f"CLAW {sub}")
+        else:
+            self._send_async(f"CLAW {sub} {l} {r}")
+
+    def _send_claw_deg(self, sub, deg_key):
+        """Calibrate + run an arm action: empty field -> just run the pose."""
+        if not self._require_connection():
+            return
+        d = self._parse_deg(deg_key, sub)
+        if d == -1:
+            return
+        self._send_async(f"CLAW {sub} {d}" if d is not None else f"CLAW {sub}")
+
+    def _send_claw_seq(self):
+        """Scoop sequence; Pi grip angles optional (fill both or leave both)."""
+        if not self._require_connection():
+            return
+        l = self.claw_vars["pi_l"].get().strip()
+        r = self.claw_vars["pi_r"].get().strip()
+        if bool(l) != bool(r):
+            messagebox.showerror("SEQ", "Pi grip: fill BOTH angles or neither.")
+            return
+        try:
+            cmd = f"CLAW SEQ {int(float(l))} {int(float(r))}" if l else "CLAW SEQ"
+        except ValueError:
+            messagebox.showerror("SEQ", "Pi grip angles must be numbers (0..180).")
+            return
+        self._send_async(cmd)
+
+    def _fetch_claw(self):
+        """Pull the MCU's calibrated angles into the entry fields."""
+        if not self._require_connection():
+            return
+        threading.Thread(target=self._claw_worker, daemon=True).start()
+
+    def _claw_worker(self):
+        resp = self.cli.send("CLAW")
+        self.after(0, self._on_claw_status, resp or "")
+
+    def _on_claw_status(self, resp):
+        def deg(pair):
+            return (int(pair.group(1)), int(pair.group(2))) if pair else None
+        m_open = re.search(r"open=\(L=(\d+),R=(\d+)\)", resp)
+        m_close = re.search(r"close=\(L=(\d+),R=(\d+)\)", resp)
+        m_arm = re.search(r"pickup=(\d+)\s+drop=(\d+)", resp)
+        m_now = re.search(r"now=\(L=(\d+),R=(\d+),P=(\d+)\)", resp)
+        if deg(m_open):
+            self.claw_vars["open_l"].set(str(deg(m_open)[0]))
+            self.claw_vars["open_r"].set(str(deg(m_open)[1]))
+        if deg(m_close):
+            self.claw_vars["close_l"].set(str(deg(m_close)[0]))
+            self.claw_vars["close_r"].set(str(deg(m_close)[1]))
+        if m_arm:
+            self.claw_vars["pick"].set(str(m_arm.group(1)))
+            self.claw_vars["drop"].set(str(m_arm.group(2)))
+        parts = []
+        if "attached=0" in resp:
+            parts.append("detached")
+        if m_now:
+            parts.append(f"jaws L={m_now.group(1)} R={m_now.group(2)} arm={m_now.group(3)}")
+        m_seq = re.search(r"seq=(\w+)", resp)
+        if m_seq:
+            parts.append(f"seq {m_seq.group(1)}...")
+        self.claw_label.configure(text=f"Claw: {', '.join(parts) or 'idle'}",
+                                  text_color="orange" if "detached" in resp else "white")
 
     def _gstatus_worker(self):
         resp = self.cli.send("GSTATUS")
@@ -285,7 +596,7 @@ class MotorGUI(ctk.CTk):
             self.after(500, self._poll_rx)
 
     def _speed_int(self):
-        return int(round(float(self.speed_slider.get())))
+        return min(MAX_SPEED, max(0, int(round(float(self.speed_slider.get())))))
 
     def _on_speed_slider(self, value):
         self.speed_label.configure(text=str(int(round(float(value)))))

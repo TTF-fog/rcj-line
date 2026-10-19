@@ -9,3 +9,22 @@ in the development cycle.
 
 More information about PlatformIO Unit Testing:
 - https://docs.platformio.org/en/latest/advanced/unit-testing/index.html
+
+## Host unit tests (`test_gyro`)
+
+The gyro controllers (`GyroStraight`, `GyroTurn`) are pure C++ with no Arduino
+dependencies, so they are tested on the host with PlatformIO's `native` env:
+
+```bash
+pio test -e native
+```
+
+The `native` env compiles only `GyroStraight.cpp` and `GyroTurn.cpp` (see
+`build_src_filter`) and needs a host `gcc`/`g++` on `PATH`. If you don't have
+one, install PlatformIO's MinGW toolchain and add it to `PATH` for the run:
+
+```powershell
+pio pkg install -g -t platformio/toolchain-gccmingw32
+$env:PATH = "$env:USERPROFILE\.platformio\packages\toolchain-gccmingw32\bin;$env:PATH"
+pio test -e native
+```

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Interactive & Scriptable CLI for the Robocup 4-Motor Controller (Teensy).
-Connects over UART/USB-serial to send commands to the Teensy motor controller,
+Interactive & Scriptable CLI for the Robocup 4-Motor Controller (Cytron Motion 2350 Pro).
+Connects over USB-CDC serial to send commands to the RP2350 motor controller,
 including the gyro straight-hold (GFWD/GBACK/...) and gyro turn
 (GTURN/GTL90/GTR90/GTL45/GTR45/...) commands.
 """
@@ -22,11 +22,73 @@ except ImportError:
 
 # Lines streamed continuously by the MCU (not command responses)
 TELEMETRY_PREFIXES = ("Q,", "G,", "T,", "#")
-ACK_PREFIXES = ("OK:", "ERR:", "STATUS:", "GSTATUS:", "PONG")
-TURN_DONE_PREFIXES = ("TDONE", "TABORT")
+ACK_PREFIXES = ("OK:", "ERR:", "STATUS:", "GSTATUS:", "PONG", "CLAW:", "CLAWSEQ")
+TURN_DONE_PREFIXES = ("TDONE", "TABORT", "CLAWSEQ")
 
 # Gyro turn commands report completion asynchronously with TDONE/TABORT
 TURN_COMMANDS = ("GTURN", "GLEFT", "GRIGHT", "GTL90", "GTR90", "GTL45", "GTR45")
+
+# Drive speeds are capped here (mirrors the firmware MAX_SPEED) so the tools
+# can never request more than the motors are allowed to run at.
+MAX_SPEED = 90
+
+
+def clamp_speed(value, default=0, signed=False):
+    """Clamp a user-supplied speed to 0..MAX_SPEED (or -MAX_SPEED..MAX_SPEED
+    when `signed`). Bad input falls back to `default` (0 = stop) rather than
+    accidentally driving at full speed."""
+    try:
+        speed = int(float(value))
+    except (TypeError, ValueError):
+        return default
+    if signed:
+        return max(-MAX_SPEED, min(MAX_SPEED, speed))
+    return max(0, min(MAX_SPEED, abs(speed)))
+
+
+# Firmware commands whose tokens are speeds (token index, signed?).
+_SINGLE_SPEED_TOKENS = {
+    "FWD": (1, False), "FORWARD": (1, False),
+    "BACK": (1, False), "REV": (1, False), "BACKWARD": (1, False),
+    "LEFT": (1, False), "RIGHT": (1, False),
+    "STEER": (1, True),
+    "GFWD": (1, False), "GBACK": (1, False),
+    "MOTOR": (2, True),
+    "GTURN": (2, False), "GLEFT": (2, False), "GRIGHT": (2, False),
+    "GTL90": (1, False), "GTR90": (1, False), "GTL45": (1, False), "GTR45": (1, False),
+}
+_MULTI_SPEED_TOKENS = {
+    "SPEED": ((1, 2), True),
+    "MOTORS": ((1, 2, 3, 4), True),
+}
+
+# Turn speed must stay >= 1 for the firmware to accept it.
+_TURN_SPEED_WORDS = {"GTURN", "GLEFT", "GRIGHT", "GTL90", "GTR90", "GTL45", "GTR45"}
+
+
+def clamp_command(cmd: str) -> str:
+    """Clamp the speed argument(s) of a raw firmware command string."""
+    parts = cmd.split()
+    if not parts:
+        return cmd
+    word = parts[0].upper()
+
+    if word in _MULTI_SPEED_TOKENS:
+        idxs, signed = _MULTI_SPEED_TOKENS[word]
+    elif word in _SINGLE_SPEED_TOKENS:
+        idx, signed = _SINGLE_SPEED_TOKENS[word]
+        idxs = (idx,)
+    else:
+        return cmd  # not a speed-bearing command: pass through
+
+    floor = 1 if word in _TURN_SPEED_WORDS else 0
+    for i in idxs:
+        if i < len(parts):
+            clamped = clamp_speed(parts[i], default=floor, signed=signed)
+            if floor:
+                clamped = max(floor, clamped)
+            parts[i] = str(clamped)
+    return " ".join(parts)
 
 
 class MotorCLI:
@@ -186,22 +248,23 @@ class MotorCLI:
         return resp_str
 
     def print_help(self):
-        print("""
+        print(f"""
 ==================== Robocup 4-Motor Commands =====================
-  fwd [speed]            : Drive forward (speed 0..255, default 150)
-  back [speed]           : Drive backward (speed 0..255, default 150)
+  NOTE: all drive speeds are capped at {MAX_SPEED} (0..{MAX_SPEED}).
+  fwd [speed]            : Drive forward (speed 0..{MAX_SPEED}, default {MAX_SPEED})
+  back [speed]           : Drive backward (speed 0..{MAX_SPEED}, default {MAX_SPEED})
   steer <speed> <ratio>  : Steer differential drive (-1.0=Left .. 1.0=Right)
-  left [speed]           : Pivot/spin left in place (default 120)
-  right [speed]          : Pivot/spin right in place (default 120)
-  speed <left> <right>   : Set left (M1,M2) and right (M3,M4) speeds (-255..255)
+  left [speed]           : Pivot/spin left in place (default {MAX_SPEED})
+  right [speed]          : Pivot/spin right in place (default {MAX_SPEED})
+  speed <left> <right>   : Set left (M1,M2) and right (M3,M4) speeds (-{MAX_SPEED}..{MAX_SPEED})
   motor <1..4> <speed>   : Drive an individual motor directly
   motors <m1..m4>        : Set speeds for all 4 motors (M1 M2 M3 M4)
   stop                   : Coast all motors to stop
   brake                  : Active dynamic short-brake
   status                 : Query current speeds and status
   ---- Gyro straight-hold (P on heading error) ----
-  gfwd [speed] [kp]      : Drive straight fwd, heading latched (default 150)
-  gback [speed] [kp]     : Drive straight rev, heading latched (default 150)
+  gfwd [speed] [kp]      : Drive straight fwd, heading latched (default {MAX_SPEED})
+  gback [speed] [kp]     : Drive straight rev, heading latched (default {MAX_SPEED})
   gstop                  : Exit gyro hold + stop motors
   gkp <kp>               : Set straight P gain, PWM per deg (0..20)
   gmax <max>             : Set max correction PWM (0..255)
@@ -214,9 +277,24 @@ class MotorCLI:
   gtr90 [speed] [kp]     : Gyro turn exactly 90 deg right
   gtl45 [speed] [kp]     : Gyro turn exactly 45 deg left
   gtr45 [speed] [kp]     : Gyro turn exactly 45 deg right
-  gtkp <kp>              : Turn P gain, PWM per deg (0..50)
+  gtkp <kp>              : Turn Kp, PWM per deg (0..50)
+  gtki <ki>              : Turn Ki, PWM per deg-s (0..10)
+  gtkd <kd>              : Turn Kd, PWM-s per deg (0..20)
+  gtimax <pwm>           : Turn integral term clamp (0..255)
   gtmin <pwm>            : Turn stall-floor PWM near target (0..255)
   gttol <deg>            : Turn done tolerance (0.5..20)
+  ---- Claw & pickup servos (jaws GP2/GP7, arm GP5) ----
+  claw open [L] [R]      : jaws apart  (angle args also re-calibrate open pose)
+  claw close [L] [R]     : jaws shut   (angle args also re-calibrate close pose)
+  claw pick [deg]        : pickup arm down (grab position)
+  claw drop [deg]        : pickup arm up (release position)
+  claw seq [piL] [piR]   : FULL CLOSE -> Pi grip angles -> PICKUP -> slow OPEN
+  claw raw <1..3> <deg>  : nudge one servo (1=left jaw, 2=right jaw, 3=arm)
+  claw                   : status (calibrated angles + live pose + defaults line)
+  claw reset|detach|attach : restore defaults / stop pulsing / re-arm
+  light <r> <g> <b> [bri]: NeoPixel color (+brightness 0..255)
+  light RED|GREEN|BLUE|YELLOW|CYAN|MAGENTA|ORANGE|WHITE|OFF|ON
+  light BRI <0..255>     : brightness only | light ? : status
   help                   : Display this help message
   quit / exit            : Exit CLI
 =====================================================================
@@ -244,35 +322,37 @@ class MotorCLI:
                 args = parts[1:]
 
                 if c == "fwd" or c == "forward":
-                    spd = args[0] if args else "150"
+                    spd = clamp_speed(args[0]) if args else MAX_SPEED
                     self.send(f"FWD {spd}")
                 elif c in ("back", "rev", "backward"):
-                    spd = args[0] if args else "150"
+                    spd = clamp_speed(args[0]) if args else MAX_SPEED
                     self.send(f"BACK {spd}")
                 elif c == "steer":
                     if len(args) == 2:
-                        self.send(f"STEER {args[0]} {args[1]}")
+                        self.send(f"STEER {clamp_speed(args[0], 0, signed=True)} {args[1]}")
                     elif len(args) == 1:
-                        self.send(f"STEER 150 {args[0]}")
+                        self.send(f"STEER {MAX_SPEED} {args[0]}")
                     else:
-                        print("Usage: steer <speed> <ratio> (e.g. steer 180 0.5)")
+                        print("Usage: steer <speed> <ratio> (e.g. steer 90 0.5)")
                 elif c == "left":
-                    spd = args[0] if args else "120"
+                    spd = clamp_speed(args[0]) if args else MAX_SPEED
                     self.send(f"LEFT {spd}")
                 elif c == "right":
-                    spd = args[0] if args else "120"
+                    spd = clamp_speed(args[0]) if args else MAX_SPEED
                     self.send(f"RIGHT {spd}")
                 elif c in ("speed", "m"):
                     if len(args) == 2:
-                        self.send(f"SPEED {args[0]} {args[1]}")
+                        self.send(f"SPEED {clamp_speed(args[0], 0, signed=True)} "
+                                  f"{clamp_speed(args[1], 0, signed=True)}")
                     else:
-                        print("Usage: speed <left [-255..255]> <right [-255..255]>")
+                        print(f"Usage: speed <left [-{MAX_SPEED}..{MAX_SPEED}]> "
+                              f"<right [-{MAX_SPEED}..{MAX_SPEED}]>")
                 elif c == "gfwd":
-                    spd = args[0] if len(args) >= 1 else "150"
+                    spd = clamp_speed(args[0]) if len(args) >= 1 else MAX_SPEED
                     kp = f" {args[1]}" if len(args) >= 2 else ""
                     self.send(f"GFWD {spd}{kp}")
                 elif c == "gback":
-                    spd = args[0] if len(args) >= 1 else "150"
+                    spd = clamp_speed(args[0]) if len(args) >= 1 else MAX_SPEED
                     kp = f" {args[1]}" if len(args) >= 2 else ""
                     self.send(f"GBACK {spd}{kp}")
                 elif c == "gstop":
@@ -291,22 +371,51 @@ class MotorCLI:
                     self.send("GSTATUS")
                 elif c == "gturn":
                     if args:
-                        self._send_turn("GTURN " + " ".join(args))
+                        extra = [args[0]]
+                        if len(args) >= 2:
+                            extra.append(str(clamp_speed(args[1])))
+                        if len(args) >= 3:
+                            extra.append(args[2])
+                        self._send_turn("GTURN " + " ".join(extra))
                     else:
-                        print("Usage: gturn <+/-deg> [speed] [kp] (e.g. gturn -90 150)")
+                        print(f"Usage: gturn <+/-deg> [speed 1..{MAX_SPEED}] [kp] (e.g. gturn -90 90)")
                 elif c in ("gleft", "gright"):
                     if args:
-                        self._send_turn(f"{c.upper()} " + " ".join(args))
+                        extra = [args[0]]
+                        if len(args) >= 2:
+                            extra.append(str(clamp_speed(args[1], 1)))
+                        if len(args) >= 3:
+                            extra.append(args[2])
+                        self._send_turn(f"{c.upper()} " + " ".join(extra))
                     else:
-                        print(f"Usage: {c} <deg> [speed] [kp] (e.g. {c} 45 150)")
+                        print(f"Usage: {c} <deg> [speed 1..{MAX_SPEED}] [kp] (e.g. {c} 45 90)")
                 elif c in ("gtl90", "gtr90", "gtl45", "gtr45"):
-                    extra = (" " + " ".join(args)) if args else ""
+                    extra = ""
+                    if args:
+                        extra = " " + str(clamp_speed(args[0], 1))
+                        if len(args) >= 2:
+                            extra += " " + args[1]
                     self._send_turn(c.upper() + extra)
                 elif c == "gtkp":
                     if len(args) == 1:
                         self.send(f"GTKP {args[0]}")
                     else:
                         print("Usage: gtkp <0.0..50.0> (e.g. gtkp 4)")
+                elif c == "gtki":
+                    if len(args) == 1:
+                        self.send(f"GTKI {args[0]}")
+                    else:
+                        print("Usage: gtki <0.0..10.0> (e.g. gtki 2.0)")
+                elif c == "gtkd":
+                    if len(args) == 1:
+                        self.send(f"GTKD {args[0]}")
+                    else:
+                        print("Usage: gtkd <0.0..20.0> (e.g. gtkd 0.5)")
+                elif c == "gtimax":
+                    if len(args) == 1:
+                        self.send(f"GTIMAX {args[0]}")
+                    else:
+                        print("Usage: gtimax <0..255> (e.g. gtimax 30)")
                 elif c == "gtmin":
                     if len(args) == 1:
                         self.send(f"GTMIN {args[0]}")
@@ -317,6 +426,15 @@ class MotorCLI:
                         self.send(f"GTTOL {args[0]}")
                     else:
                         print("Usage: gttol <0.5..20> (e.g. gttol 2)")
+                elif c == "claw":
+                    # claw open [L] [R] | close [L] [R] | pick [deg] | drop [deg]
+                    # | seq [piL] [piR] | raw <1..3> <deg> | reset|detach|attach
+                    if not args:
+                        self.send("CLAW")   # status dump
+                    else:
+                        # Firmware is case-insensitive; uppercase the sub-token
+                        # so error messages match its usage strings.
+                        self.send(" ".join(["CLAW", args[0].upper()] + args[1:]))
                 elif c == "stop":
                     self.send("STOP")
                 elif c in ("brake", "brk"):
@@ -360,7 +478,7 @@ def main():
     parser.add_argument("--done-timeout", "-t", type=float, default=8.0,
                         help="Seconds to wait for TDONE after gyro turn commands (default: 8)")
     parser.add_argument("command", nargs="*",
-                        help="Optional command to execute once and exit (e.g. 'fwd 150', 'gtl90', 'stop')")
+                        help="Optional command to execute once and exit (e.g. 'fwd 90', 'gtl90', 'stop')")
 
     args = parser.parse_args()
 
@@ -369,8 +487,8 @@ def main():
     cli.connect()
 
     if args.command:
-        # Run one-off command
-        full_cmd = " ".join(args.command)
+        # Run one-off command (clamp any speed tokens to MAX_SPEED)
+        full_cmd = clamp_command(" ".join(args.command))
         first = full_cmd.split()[0].upper()
         if first in TURN_COMMANDS:
             cli.send(full_cmd, wait_done_s=args.done_timeout)

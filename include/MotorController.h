@@ -5,13 +5,17 @@
 #include <stdint.h>
 #include "GyroStraight.h"
 #include "GyroTurn.h"
+#include "ServoClaw.h"
 
 /** Heading source: fills headingDegOut with 0..360 fused yaw, true on success. */
 typedef bool (*HeadingProviderFn)(float &headingDegOut);
 
+/** Pixel control: apply r/g/b (0..255) at brightness (0..255). True on success. */
+typedef bool (*PixelSetFn)(uint8_t r, uint8_t g, uint8_t b, uint8_t brightness);
+
 /**
  * @brief Representation of a single H-bridge motor channel using 2 PWM/DIR pins.
- * Matches the hardware layout in src/example.txt (Cytron Maker Drive dual-PWM).
+ * Matches the Motion 2350 Pro onboard driver terminals (M1..M4 = GP8..GP15).
  */
 struct MotorPinConfig {
     int pin1;
@@ -19,6 +23,13 @@ struct MotorPinConfig {
 };
 
 constexpr int MOTOR_COUNT = 4;
+
+/**
+ * @brief Hard cap on the PWM magnitude any motor may be driven at.
+ * Enforced centrally in MotorController::driveMotor() so every source
+ * (CLI, GUI, gyro straight-hold/turn mix) is limited identically.
+ */
+constexpr int16_t MAX_SPEED = 90;
 
 /**
  * @brief Outcome of a gyro turn, published once via pollTurnDone().
@@ -155,6 +166,17 @@ public:
      * GFWD/GBACK auto-latching and for updateStraight().
      */
     void setHeadingProvider(HeadingProviderFn fn);
+    /** @brief Provide the RGB pixel (NeoPixel) sink for the LIGHT commands. */
+    void setPixelHandler(PixelSetFn fn);
+    /** @brief Attach a passive buzzer pin (-1 disables BEEP; Motion 2350 Pro: GP22). */
+    void setBuzzerPin(int pin);
+    /** @brief Attach the claw/pickup servo group (nullptr = board has none).
+     *  Enables the CLAW command for tuning open/close/pickup/drop angles. */
+    void setClaw(ServoClaw *claw);    /** @brief Start a non-blocking beep: ms per chirp, hz, count of chirps
+     *  separated by a short pause. serviceBuzzer() finishes the pattern. */
+    void beep(uint16_t ms, uint16_t hz, uint8_t count = 1);
+    /** @brief Service any pending beep pattern (call from loop()). */
+    void serviceBuzzer();
     void setStraightKp(float kp);
     float getStraightKp() const;
     void setStraightMaxCorrection(float maxCorrection);
@@ -183,15 +205,27 @@ public:
     // =========================================================================
     // Gyro turn (in-place spin to a heading target: 90/45 deg etc.)
     // =========================================================================
-    /** @brief Turn P gain (PWM per degree). */
+    /** @brief Turn Kp (PWM per degree). Configurable at runtime via GTKP. */
     void setTurnKp(float kp);
     float getTurnKp() const;
+    /** @brief Turn Ki (PWM per degree-second). Integrator resets on
+     *  start/finish/abort. Configurable at runtime via GTKI. */
+    void setTurnKi(float ki);
+    float getTurnKi() const;
+    /** @brief Turn Kd (PWM-seconds per degree); derivative damping that
+     *  brakes the spin as the error shrinks. Runtime via GTKD. */
+    void setTurnKd(float kd);
+    float getTurnKd() const;
     /** @brief Minimum turn PWM (stall floor near the target). */
     void setTurnMinPwm(float minPwm);
     float getTurnMinPwm() const;
     /** @brief Turn done tolerance in degrees. */
     void setTurnTolerance(float tolDeg);
     float getTurnTolerance() const;
+    /** @brief Clamp on the turn integral term (PWM). Anti-windup. Runtime
+     *  via GTIMAX. */
+    void setTurnIntegralMax(float maxPwm);
+    float getTurnIntegralMax() const;
 
     /**
      * @brief Start an in-place turn by a relative angle from current heading.
@@ -264,19 +298,44 @@ private:
     GyroStraight _straight;
     HeadingProviderFn _headingProvider = nullptr;
 
+    // Passive buzzer (-1 = not fitted). Non-blocking chirp patterns via
+    // tone()/noTone(): beep(ms, hz, count) schedules `count` chirps separated
+    // by BEEP_GAP_MS; serviceBuzzer() advances the pattern from loop().
+    int _buzzerPin = -1;
+    unsigned long _toneUntilMs = 0;   // expiry of the current tone or gap window
+    uint16_t _beepMs = 0;             // chirp duration
+    uint16_t _beepHz = 1900;          // chirp frequency
+    uint8_t _beepsLeft = 0;           // chirps remaining, including current
+    bool _beepGap = false;            // currently in the gap between chirps
+    static constexpr unsigned BEEP_GAP_MS = 160;
+
+    // Claw/pickup servos (nullptr = not fitted). The CLAW command tunes the
+    // action angles and drives the jaws/arm through this object.
+    ServoClaw *_claw = nullptr;
+
+    // RGB pixel state (defaults: solid white at full brightness, as boot does)
+    PixelSetFn _pixelHandler = nullptr;
+    uint8_t _pixR = 255, _pixG = 255, _pixB = 255;
+    uint8_t _pixBri = 255;
+    uint8_t _pixBriLast = 255;  // brightness to restore on LIGHT ON
+    bool _pixOn = true;
+
     GyroTurn _turn;
     GyroTurnResult _turnResult = {false, false, 0.0f, 0.0f, -1.0f};
     bool _turnResultPending = false;
     bool _turnBrakePending = false;
     unsigned long _turnBrakeReleaseMs = 0;
+    unsigned long _turnLastStepMs = 0;  // previous PID step, for loop dt
     uint8_t _turnGlitches = 0;
 
-    static constexpr int16_t DEFAULT_TURN_SPEED = 150;
+    static constexpr int16_t DEFAULT_TURN_SPEED = 90;
     static constexpr uint8_t TURN_GLITCH_ABORT = 5;  // failed IMU reads before abort
     static constexpr unsigned TURN_BRAKE_MS = 80;    // brake hold after finishing
 
     /** @brief Cancel straight-hold + gyro turn + any pending result/brake. */
     void cancelAutopilot();
+    /** @brief Push the cached LIGHT state through the pixel handler. */
+    bool applyPixelNow();
     void abortTurn();
     void doGyroTurn(const char *name, float deltaDeg, int16_t speed,
                     bool haveKp, float kp, Stream &serialStream);
