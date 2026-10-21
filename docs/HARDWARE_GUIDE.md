@@ -82,9 +82,10 @@ which limits current spikes. Lower it for gentler starts, or set 0 to turn the r
 
 ### Heading
 
-`IMU` prints one reading. `heading` is 0..360, increasing clockwise, and 0 is wherever
-the robot pointed at boot. The magnetometer is off on purpose (motors disturb it), so
-the heading slowly drifts over minutes. Use it for relative moves, not as a compass.
+`IMU` prints one reading. `heading` is 0..360 and increases clockwise. Its zero is
+arbitrary: the direction at the last BNO055 power-up, which a firmware reboot doesn't
+reset. The magnetometer is off on purpose (motors disturb it), so the heading slowly
+drifts over minutes. Use it for relative moves, which is all STRAIGHT and TURN need.
 
 `cal=sys,gyro,accel,mag`: gyro should reach 3 after a few seconds standing still. Mag
 always shows 0.

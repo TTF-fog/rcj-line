@@ -72,8 +72,8 @@ IMU heading=93.25 roll=-0.50 pitch=1.06 gx=0.00 gy=-0.06 gz=12.50 qw=0.7310 qx=0
 STAT mode=TURN left=45 right=-45 target=183.3 err=12.4 remain=0 grab=IDLE tof=312,-1,8190,-1
 ```
 
-- `heading` is 0..360 clockwise, relative to where the robot pointed at boot
-  (the magnetometer is off, so `cal` mag is always 0).
+- `heading` is 0..360 clockwise from an arbitrary zero (the BNO055's last power-up,
+  not the last firmware reboot). The magnetometer is off, so `cal` mag is always 0.
 - `gx/gy/gz` are deg/s. `cal` is system, gyro, accel, mag calibration, 0..3.
 - `left`/`right` are the motor outputs right now, after the ramp.
 - `target`/`err` are `nan` unless in STRAIGHT or TURN.

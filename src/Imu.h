@@ -4,7 +4,7 @@
 
 // BNO055 in IMUPLUS mode (gyro + accelerometer fusion, magnetometer off).
 // The magnetometer is left out on purpose: motors and steel on the field bend it,
-// which makes the heading jump. Heading is relative to the power-on orientation.
+// which makes the heading jump. Heading zero is wherever the chip last powered up.
 namespace imu {
 
 struct Sample {
