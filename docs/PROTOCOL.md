@@ -35,6 +35,9 @@ Other lines the robot sends on its own:
 ```
 READY imu=1 tof=2         after boot
 EVT ESTOP                 user button pressed: motors braked, GRAB cancelled
+EVT TOF 3 init_failed     a ToF slot failed discovery (init_failed / address_failed)
+EVT TOF 1 lost            a working ToF gave no reading for 0.5 s
+EVT TOF stray device at 0x29 on I2C1, check XSHUT wiring
 ```
 
 ## Commands
@@ -52,6 +55,8 @@ EVT ESTOP                 user button pressed: motors braked, GRAB cancelled
 | `SERVO <1\|2\|3> <deg>` | Raw servo move: 1 = left jaw, 2 = right jaw, 3 = arm. |
 | `LIGHT <r> <g> <b>`, `LIGHT OFF` | Light bar color, 0..255. Boots white. |
 | `STATUS`, `IMU` | Print one `STAT` or `IMU` line. |
+| `TOF` | Print one `TOF <slot> state=.. bus=.. addr=.. xshut=.. mm=..` line per slot. |
+| `TOF SCAN` | Rediscover all ToF sensors, then print the slots. Refused while moving (blocks ~0.5 s). |
 | `STREAM <hz>` | Send `IMU` + `STAT` lines continuously, 0 = off. Same as `SET stream.hz`. |
 | `SET <key> <value>` | Change a setting until reboot. |
 | `GET [key]` | Print one or all settings as `CFG key=value` lines. |
@@ -73,7 +78,7 @@ STAT mode=TURN left=45 right=-45 target=183.3 err=12.4 remain=0 grab=IDLE tof=31
 - `left`/`right` are the motor outputs right now, after the ramp.
 - `target`/`err` are `nan` unless in STRAIGHT or TURN.
 - `remain` is ms left on a timed move, 0 otherwise.
-- `tof` is mm for sensors 1..4. -1 = not connected, 8190 or more = nothing in range.
+- `tof` is mm for sensors 1..4. -1 = no reading (slot not `ok`, see `TOF`), 8190 or more = nothing in range.
 
 Stream lines are dropped, never queued, when the Pi isn't reading fast enough.
 
