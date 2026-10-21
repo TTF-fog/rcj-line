@@ -27,7 +27,7 @@ def main():
     parser.add_argument("--stream", action="store_true", help="show IMU and STAT lines")
     args = parser.parse_args()
 
-    port = serial.Serial(args.port, 115200)
+    port = serial.Serial(args.port, 115200, exclusive=True)
     threading.Thread(target=print_replies, args=(port, args.stream), daemon=True).start()
     print(f"connected to {args.port}, type HELP, Ctrl-D to quit")
     try:
