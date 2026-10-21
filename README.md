@@ -15,7 +15,8 @@ pio test -e native      # host tests for the control math
 If the board doesn't show up at all, hold BOOTSEL while plugging in USB and drag
 `.pio/build/robot/firmware.uf2` onto the `RP2350` drive.
 
-Talk to it by hand with `python tools/robot_cli.py` (needs `pip install -r requirements.txt`).
+Control it from a laptop with the GUI, `python tools/robot_gui.py`, or type commands with
+`python tools/robot_cli.py`. Both need `pip install -r requirements.txt`.
 [docs/HARDWARE_GUIDE.md](docs/HARDWARE_GUIDE.md) explains how to bring up and tune every part.
 
 ## Wiring

@@ -13,9 +13,14 @@ python tools/robot_cli.py --stream      # also show IMU/STAT lines
 Type commands, one per line. Every command answers `OK <NAME>` or `ERR <NAME> <reason>`.
 Quitting the CLI sends `STOP`.
 
-On power-up the robot prints `READY imu=<0|1> tof=<working sensors>`. Keep it still while
-it boots: heading 0 is wherever it points when the IMU starts. The CLI may connect after
-`READY` was sent, so use `IMU` (`IMU none` = no BNO055) and `TOF` to check the same things.
+`python tools/robot_gui.py [--port /dev/ttyACM0]` does everything below with buttons, plus
+live heading, motor and ToF displays. WASD or the arrow keys drive while held, Q/E turn 90°,
+and Space or Esc stops. Its console takes the same typed commands. Only one program can
+have the port open, so close the GUI before using the CLI or flashing.
+
+On power-up the robot prints `READY imu=<0|1> tof=<working sensors>`. The CLI may connect
+after `READY` was sent, so use `IMU` (`IMU none` = no BNO055) and `TOF` to check the same
+things.
 
 ## Status pixels and ESTOP
 
