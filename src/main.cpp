@@ -16,14 +16,18 @@
 #include "Tof.h"
 
 void setupI2c() {
+    // The default timeout is 1 s per transaction; a dead sensor or stuck bus
+    // would freeze the control loop that long. Reset the bus on timeout instead.
     Wire.setSDA(I2C0_SDA);
     Wire.setSCL(I2C0_SCL);
     Wire.setClock(I2C_HZ);
     Wire.begin();
+    Wire.setTimeout(10, true);
     Wire1.setSDA(I2C1_SDA);
     Wire1.setSCL(I2C1_SCL);
     Wire1.setClock(I2C_HZ);
     Wire1.begin();
+    Wire1.setTimeout(10, true);
 }
 
 void checkEstopButton() {
@@ -48,11 +52,11 @@ void setup() {
     pinMode(ESTOP_BUTTON_PIN, INPUT_PULLUP);
 
     setupI2c();
-    tof::begin();  // first, so the ToFs are off the bus before the IMU is probed
+    tof::scan();  // first, so the ToFs are off the bus before the IMU is probed
     imu::begin();
     claw::begin();
 
-    Serial.printf("READY imu=%d tof=%d\n", imu::ok(), tof::presentCount());
+    Serial.printf("READY imu=%d tof=%d\n", imu::ok(), tof::okCount());
 }
 
 void loop() {

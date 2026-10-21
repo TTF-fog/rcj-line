@@ -9,6 +9,7 @@
 #include "Motion.h"
 #include "Motors.h"
 #include "Telemetry.h"
+#include "Tof.h"
 
 namespace {
 
@@ -50,6 +51,16 @@ const char *cmdStatus(char **, int) {
 
 const char *cmdImu(char **, int) {
     telemetry::printImu();
+    return nullptr;
+}
+
+const char *cmdTof(char **args, int count) {
+    if (count == 1) {
+        if (!word(args[0], "SCAN")) return "use TOF or TOF SCAN";
+        if (motion::mode() != motion::Mode::Idle) return "busy moving, STOP first";
+        tof::scan();
+    }
+    tof::printStatus();
     return nullptr;
 }
 
@@ -186,6 +197,7 @@ const Command COMMANDS[] = {
     {"HELP", 0, 0, cmdHelp, "HELP"},
     {"STATUS", 0, 0, cmdStatus, "STATUS  one STAT line"},
     {"IMU", 0, 0, cmdImu, "IMU  one IMU line"},
+    {"TOF", 0, 1, cmdTof, "TOF [SCAN]  sensor states, SCAN rediscovers them"},
     {"STREAM", 1, 1, cmdStream, "STREAM <hz>  IMU + STAT lines, 0 = off"},
     {"DRIVE", 2, 3, cmdDrive, "DRIVE <speed> <steer -1..1> [ms]"},
     {"STRAIGHT", 1, 2, cmdStraight, "STRAIGHT <speed> [ms]  hold the current heading"},
