@@ -1,0 +1,15 @@
+{
+  "model": "models/victims_320_ncnn_model",
+  "threads": 2,
+  "frames": 450,
+  "seconds": 15.001,
+  "live_fps": 30.0,
+  "processing_ms_mean": 21.41,
+  "processing_ms_p95": 27.4,
+  "sensor_to_result_ms_mean": 48.87,
+  "sensor_to_result_ms_p95": 66.12,
+  "temperature_start_c": 67.2,
+  "temperature_end_c": 74.35,
+  "total_detections": 338,
+  "last_detections": []
+}

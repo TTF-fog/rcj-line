@@ -1,0 +1,15 @@
+{
+  "model": "models/hackclub_best_320_ncnn_model",
+  "threads": 2,
+  "frames": 844,
+  "seconds": 30.007,
+  "live_fps": 28.13,
+  "processing_ms_mean": 28.51,
+  "processing_ms_p95": 40.98,
+  "sensor_to_result_ms_mean": 76.78,
+  "sensor_to_result_ms_p95": 99.63,
+  "temperature_start_c": 68.3,
+  "temperature_end_c": 82.05,
+  "total_detections": 73,
+  "last_detections": []
+}

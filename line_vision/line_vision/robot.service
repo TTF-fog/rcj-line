@@ -1,0 +1,16 @@
+# Start the robot program at boot:
+#   sudo cp robot.service /etc/systemd/system/ && sudo systemctl enable --now robot
+#   journalctl -u robot -f      # watch the log
+[Unit]
+Description=RCJ Rescue Line robot
+After=network.target
+
+[Service]
+User=pi
+WorkingDirectory=/home/pi/line_vision
+ExecStart=/home/pi/line_vision/.venv-yolo/bin/python -m robot --view
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,14 @@
+{
+  "model": "models/yolo26n_320_ncnn_model",
+  "threads": 4,
+  "frames": 261,
+  "seconds": 20.212,
+  "live_fps": 12.91,
+  "processing_ms_mean": 76.86,
+  "processing_ms_p95": 168.83,
+  "sensor_to_result_ms_mean": 224.35,
+  "sensor_to_result_ms_p95": 395.75,
+  "temperature_start_c": 83.7,
+  "temperature_end_c": 83.7,
+  "total_detections": 0
+}

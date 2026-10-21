@@ -1,0 +1,26 @@
+{
+  "model": "models/victims_416_ncnn_model",
+  "threads": 2,
+  "frames": 366,
+  "seconds": 15.0,
+  "live_fps": 24.4,
+  "processing_ms_mean": 40.5,
+  "processing_ms_p95": 46.09,
+  "sensor_to_result_ms_mean": 125.63,
+  "sensor_to_result_ms_p95": 161.55,
+  "temperature_start_c": 78.2,
+  "temperature_end_c": 82.05,
+  "total_detections": 195,
+  "last_detections": [
+    {
+      "class": "silver",
+      "confidence": 0.314,
+      "xyxy": [
+        327.8,
+        187.3,
+        431.4,
+        269.2
+      ]
+    }
+  ]
+}

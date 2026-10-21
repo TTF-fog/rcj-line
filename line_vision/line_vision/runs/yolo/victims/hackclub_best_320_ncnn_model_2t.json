@@ -1,0 +1,36 @@
+{
+  "model": "models/hackclub_best_320_ncnn_model",
+  "threads": 2,
+  "frames": 452,
+  "seconds": 15.03,
+  "live_fps": 30.07,
+  "processing_ms_mean": 21.83,
+  "processing_ms_p95": 24.3,
+  "sensor_to_result_ms_mean": 48.13,
+  "sensor_to_result_ms_p95": 52.51,
+  "temperature_start_c": 83.15,
+  "temperature_end_c": 81.5,
+  "total_detections": 148,
+  "last_detections": [
+    {
+      "class": "silver",
+      "confidence": 0.776,
+      "xyxy": [
+        363.9,
+        186.1,
+        462.1,
+        265.9
+      ]
+    },
+    {
+      "class": "silver",
+      "confidence": 0.415,
+      "xyxy": [
+        0.8,
+        148.1,
+        154.5,
+        364.9
+      ]
+    }
+  ]
+}

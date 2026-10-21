@@ -1,0 +1,14 @@
+{
+  "model": "models/yolo26n_416_ncnn_model",
+  "threads": 2,
+  "frames": 344,
+  "seconds": 20.022,
+  "live_fps": 17.18,
+  "processing_ms_mean": 57.82,
+  "processing_ms_p95": 76.06,
+  "sensor_to_result_ms_mean": 180.55,
+  "sensor_to_result_ms_p95": 245.68,
+  "temperature_start_c": 82.05,
+  "temperature_end_c": 85.35,
+  "total_detections": 347
+}

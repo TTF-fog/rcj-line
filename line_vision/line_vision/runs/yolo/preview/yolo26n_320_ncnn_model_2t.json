@@ -1,0 +1,26 @@
+{
+  "model": "models/yolo26n_320_ncnn_model",
+  "threads": 2,
+  "frames": 209,
+  "seconds": 10.014,
+  "live_fps": 20.87,
+  "processing_ms_mean": 33.32,
+  "processing_ms_p95": 46.39,
+  "sensor_to_result_ms_mean": 85.75,
+  "sensor_to_result_ms_p95": 111.03,
+  "temperature_start_c": 78.75,
+  "temperature_end_c": 84.8,
+  "total_detections": 178,
+  "last_detections": [
+    {
+      "class": "chair",
+      "confidence": 0.25,
+      "xyxy": [
+        526.5,
+        246.4,
+        588.5,
+        302.6
+      ]
+    }
+  ]
+}
